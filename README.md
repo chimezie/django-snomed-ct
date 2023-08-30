@@ -58,7 +58,6 @@ from snomed_ct.models import Concept, ICD10_Mapping, TextDefinition, Description
 You can fetch Concept instances by their SNOMED-CT identifiers: 
 
 ```python
->>> from snomed_ct.models import Concept, ICD10_Mapping, TextDefinition, Description, ISA
 >>> from snomed_ct.models import Concept
 >>> Concept.by_id('59820001')
 <Concept: 59820001|Blood vessel structure (body structure)>
