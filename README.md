@@ -9,7 +9,7 @@ A [Django App](https://www.djangoproject.com/) for storing, managing, and queryi
 ```console
 pip install django-snomed-ct
 ```
-It currently works with Django versions 3.2+ but not 4+ and has been tested with [SNOMED CT United States Edition](https://www.nlm.nih.gov/healthit/snomedct/us_edition.html) version 20230301
+It currently works with Django versions 3.2+ but not 4+ and has been tested with [SNOMED CT United States Edition](https://www.nlm.nih.gov/healthit/snomedct/us_edition.html) version 20230301 {procedure}
 (released on  March 1, 2023).
 
 As it is a separate, installable Django app that doesn't come with a Django [project](https://realpython.com/get-started-with-django-1/#create-a-django-project), you will either
@@ -303,4 +303,4 @@ concept's SNOMED-CT definition, embedding SNOMED-CT identifiers to referenced co
 excluding these otherwise.
 
 The rendering process is mostly based on [Attempto Controlled English](https://en.wikipedia.org/wiki/Attempto_Controlled_English) but also implements its own syntactic mechanisms
-specific to SNOMED-CT's semantics, such as part-whole reasoning to infer that "everything located in a part is located in the whole."
+specific to SNOMED-CT's semantics, such as part-whole reasoning to infer that "everything located in a part is located in the whole," morphological phrases, clinical drugs (dose units), pathophysiology, specimen, situations with explicit context ("a situation involving [..] and [..], a finding in [..], "), and dose forms ("is administered via, given by, administered as [..]"). , 
