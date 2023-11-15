@@ -1083,6 +1083,9 @@ class SiteRenderer(RoleRenderer):
         self.anatomical_sites = [self.render_concept(Concept.by_id(i), with_indef_article=True)
                                  for i in set(
                                             Concept.by_id(relation_destination_id(relationship)).part_of_transitive())]
+        if not self.anatomical_sites:
+            self.anatomical_sites = [self.render_concept(Concept.by_id(relation_destination_id(relationship)),
+                                                         with_indef_article=True)]
         self.is_lengthy = len(self.anatomical_sites) > 1
 
     def render(self, relationships=None):
@@ -1220,10 +1223,17 @@ class ControlledEnglishGenerator(SnomedNounRenderer):
             role_group_defn_text += "{}It {}".format(".  " if brief_role_group_items else "",
                                                      ".  It ".join(lengthy_role_group_items))
 
-        definition_head = pretty_print_list(classification_names_w_article, and_char=", and ")
-        definition_text = "{}.  {}".format(", and ".join([definition_head]),
-                                           role_group_defn_text) if has_role_group_definitions else definition_head
-        return "{} is {}".format(self.concept.fully_specified_name_no_type, definition_text)
+        definition_head = pretty_print_list(classification_names_w_article,
+                                            and_char=", and ") if classification_names_w_article else ""
+        if definition_head:
+            definition_text = "{}.  {}".format(", and ".join([definition_head]),
+                                               role_group_defn_text) if has_role_group_definitions else definition_head
+        elif has_role_group_definitions:
+            definition_text = role_group_defn_text
+        else:
+            definition_text = ""
+        return "{} is {}".format(self.concept.fully_specified_name_no_type,
+                                 definition_text) if definition_text else ""
 
 
 def main():
