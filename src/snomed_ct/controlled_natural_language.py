@@ -110,6 +110,7 @@ MEASUREMENT_METHOD = 370129005
 PROCEDURE_SITE_DIRECT = 405813007
 PROCEDURE_SITE_INDIRECT = 405814001
 DIRECT_DEVICE = 363699004
+INDIRECT_DEVICE=363710007
 USING_SOME_DEVICE = 425391005
 USING_DEVICE = 424226004
 ASSOCIATED_WITH = 47429007
@@ -188,6 +189,8 @@ HAS_FILLING = 827081001
 TEMPORALLY_RELATED_TO = 726633004
 HAS_COATING_MATERIAL = 1148967007
 
+HAS_DISPOSITION = 726542003
+
 
 class MalformedSNOMEDExpressionError(Exception):
     pass
@@ -212,6 +215,8 @@ class SnomedNounRenderer(ABC):
         concept_name = concept_name.lower().split(' - ')[0]
         if concept_name.endswith(', device'):
             concept_name = concept_name.split(', device')[0]
+        if concept_type in ('TNM', 'observable entity'):
+            concept_name = concept_name.split(' observable')[0]
 
         if concept_type not in MASS_NOUN_LIKE_TYPES and with_indef_article:
             concept_name_phrase = prefix_with_indefinite_article(concept_name)
@@ -226,16 +231,18 @@ class SnomedNounRenderer(ABC):
 class ComplexRenderer(SnomedNounRenderer):
     @classmethod
     def inspect_concept(cls, non_isa_relationship_info):
-        if any(relationship_filter(non_isa_relationship_info, cls.attributes, getter_fn=relation_type_id)):
+        relevant_non_isa_rels = list(relationship_filter(non_isa_relationship_info, cls.attributes,
+                                                         getter_fn=relation_type_id))
+        if any(relevant_non_isa_rels):
+            #Either all the relations or just those that identify the complex
             rels = non_isa_relationship_info if not cls.identifying_properties else list(
                 relationship_filter(non_isa_relationship_info, cls.identifying_properties, getter_fn=relation_type_id))
             if rels:
                 target_rel = choice(rels)
             else:
                 return False, []
-            other_rels = list(relationship_exclude(relationship_filter(non_isa_relationship_info, cls.attributes,
-                                                                       getter_fn=relation_type_id),
-                                                   [relation_id(target_rel)],
+            # Exclude (from the relations relevant to this complex) the one that will identify it
+            other_rels = list(relationship_exclude(relevant_non_isa_rels,[relation_id(target_rel)],
                                                    getter_fn=relation_id))
             return True, list(map(relation_id, other_rels))
         else:
@@ -419,7 +426,7 @@ class MeasurableProductRenderer(ComplexRenderer):
 class Pathophysiology(ComplexRenderer):
     identifying_properties = [ASSOCIATED_MORPHOLOGY, PATHOLOGICAL_PROCESS]
     can_collapse_objects = False
-    attributes = [ASSOCIATED_MORPHOLOGY, FINDING_SITE, PATHOLOGICAL_PROCESS, OCCURRENCE]
+    attributes = [ASSOCIATED_MORPHOLOGY, FINDING_SITE, PATHOLOGICAL_PROCESS, OCCURRENCE, CAUSATIVE_AGENT]
 
     def __init__(self, relationships, id_reference=False):
         super().__init__(id_reference)
@@ -439,6 +446,7 @@ class Pathophysiology(ComplexRenderer):
 
     def render_group(self, group_rels, phrases, relationships):
         group_rels = list(group_rels)
+        causal_rels = list(relationship_filter(group_rels, [CAUSATIVE_AGENT], getter_fn=relation_type_id))
         path_process_rels = list(relationship_filter(group_rels, [PATHOLOGICAL_PROCESS],
                                                      getter_fn=relation_type_id))
         morph_rels = list(relationship_filter(group_rels, [ASSOCIATED_MORPHOLOGY],
@@ -474,20 +482,27 @@ class Pathophysiology(ComplexRenderer):
                                                                  **render_object_concept_kwargs(process)))
         elif morph_rels:
             morph_rel = morph_rels[0]
+            causal_phrase = " caused by {}".format(
+                self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
+                                    with_indef_article=True)) if causal_rels else ""
             if occurrence_name and occurrence_is_modifier:
-                morph_phrase = "is characterized in form by {}{}".format(
+                morph_phrase = "is characterized in form by {}{}{}".format(
                     prefix_with_indefinite_article(occurrence_name),
-                    self.render_concept(**render_object_concept_kwargs(morph_rel)))
+                    self.render_concept(**render_object_concept_kwargs(morph_rel)),
+                    causal_phrase
+                )
             elif occurrence_name:
-                morph_phrase = "is characterized in form by {} occurring during {}".format(
+                morph_phrase = "is characterized in form by {}{} occurring during {}".format(
                     self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(morph_rel)),
+                    causal_phrase,
                     prefix_with_indefinite_article(occurrence_name)
                 )
             else:
-                morph_phrase = "is characterized in form by {}".format(
+                morph_phrase = "is characterized in form by {}{}".format(
                     self.render_concept(with_indef_article=True,
-                                        **render_object_concept_kwargs(morph_rel)))
+                                        **render_object_concept_kwargs(morph_rel)),
+                    causal_phrase)
         elif occurrence_rels:
             occurence_rel = occurrence_rels[0]
             phrase = OccursRenderer(occurence_rel, id_reference=self.id_reference).render(relationships)
@@ -495,17 +510,22 @@ class Pathophysiology(ComplexRenderer):
             raise NotImplementedError(self.relationships)
         if path_process_rels and morph_rels:
             #Pathological process and associated morphological
+            causal_phrase = " caused by {}".format(
+                self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
+                                    with_indef_article=True)) if causal_rels else ""
             morph_rel = morph_rels[0]
-            morph_phrase = "characterized in form by {}".format(
+            morph_phrase = "characterized in form by {}{}".format(
                 self.render_concept(with_indef_article=True,
-                                    **render_object_concept_kwargs(morph_rel)))
+                                    **render_object_concept_kwargs(morph_rel)),
+                causal_phrase)
         if location_rels:
             location_rel = location_rels[0]
             location_phrase = "located in {}".format(
                                 self.render_concept(with_indef_article=True,
                                                     **render_object_concept_kwargs((location_rel))))
         if proc_phrase:
-            phrase = (f"{proc_phrase} {morph_phrase} {location_phrase}" if morph_phrase
+            phrase = ((f"{proc_phrase} {morph_phrase} {location_phrase}"
+                       if location_phrase else f"{proc_phrase} {morph_phrase}") if morph_phrase
                       else f"{proc_phrase} {location_phrase}")
         elif morph_phrase:
             phrase = f"{morph_phrase} {location_phrase}" if location_phrase else morph_phrase
@@ -762,9 +782,21 @@ class RolePairRenderer(SnomedNounRenderer):
 
     @classmethod
     def relationships_to_skip(cls, non_isa_relationship_info):
-        return list(relationship_filter(non_isa_relationship_info,
-                                        cls.object_id,
-                                        getter_fn=relation_type_id))#.filter(type_id__in=cls.object_id)
+        obj_rels_to_skip = []
+        target_rel = None
+        relations = list(relationship_filter(non_isa_relationship_info, [cls.target_id] + cls.object_id,
+                                             getter_fn=relation_type_id))
+        for group, group_rels in groupby(sorted(relations, key=relation_group), relation_group):
+            group_rels = list(group_rels)
+            targets_in_group = list(relationship_filter(group_rels, [cls.target_id],
+                                                        getter_fn=relation_type_id))
+            objects_in_group = list(relationship_filter(group_rels, cls.object_id, getter_fn=relation_type_id))
+            if objects_in_group:
+                obj_rels_to_skip.extend(objects_in_group)
+            if target_rel is None and targets_in_group:
+                target_rel = choice(targets_in_group)
+            obj_rels_to_skip.extend([t for t in targets_in_group if relation_id(t) != relation_id(target_rel)])
+        return obj_rels_to_skip
 
     def interpretation_subject_name(self, concept):
         raise NotImplemented("..")
@@ -778,23 +810,6 @@ class RolePairRenderer(SnomedNounRenderer):
 class InterpretationRolePairRenderer(RolePairRenderer):
     target_id = INTERPRETS
     object_id = [HAS_INTERPRETATION]
-
-    @classmethod
-    def relationships_to_skip(cls, non_isa_relationship_info):
-        obj_rels_to_skip = list(relationship_filter(non_isa_relationship_info, cls.object_id,
-                                                    getter_fn=relation_type_id))
-        #obj_rels_to_skip = non_isa_relationships.filter(type_id__in=cls.object_id)
-        target_rels = list(relationship_filter(non_isa_relationship_info, [cls.target_id], getter_fn=relation_type_id))
-        # target_rels = non_isa_relationships.filter(type_id=cls.target_id)
-
-        if len(target_rels) in [0, 1]:
-            return obj_rels_to_skip
-        else:
-            target_rel = choice(non_isa_relationship_info)
-            return obj_rels_to_skip + list(relationship_filter(non_isa_relationship_info,
-                                                               [relation_id(target_rel)],
-                                                               getter_fn=relation_id))
-            # return obj_rels_to_skip | non_isa_relationship_info)) .exclude(id=target_rel.id)
 
     def render(self, relationships=None):
         grouping = {}
@@ -819,9 +834,6 @@ class InterpretationRolePairRenderer(RolePairRenderer):
                                                                 concept_id=relation_destination_id(i),
                                                                 concept_full_name=relation_destination_name(i)),
                                                      object_rels)), and_char=", and ") if object_rels else None
-            #     targets = pretty_print_list(list(map(self.render_concept, object_rels.destinations().prefetch_related(
-            # 'descriptions'))),
-            #                                 and_char=", and ") if object_rels.exists() else None
                 interpretation_outcome = f" as {targets}" if targets else ""
                 prefix = "is " if not phrases else ""
                 phrases.append(f"{prefix}an interpretation of {interpreted}{interpretation_outcome}")
@@ -833,11 +845,13 @@ class MethodApplicationRenderer(RolePairRenderer):
     target_id = METHOD
     object_id = [DIRECT_SUBSTANCE, DIRECT_MORPHOLOGY, DIRECT_DEVICE, USING_SOME_DEVICE, PROCEDURE_DEVICE,
                  SURGICAL_APPROACH, PROCEDURE_MORPHOLOGY, ACCESS, HAS_INTENT, USING_SUBSTANCE, USING_ENERGY,
-                 MEASUREMENT_METHOD, REVISION_STATUS, INDIRECT_MORPHOLOGY]
+                 MEASUREMENT_METHOD, REVISION_STATUS, INDIRECT_MORPHOLOGY, USING_DEVICE,
+                 INDIRECT_DEVICE]
 
     object_phrase = {
         DIRECT_SUBSTANCE: ('of', True),
         DIRECT_DEVICE: ('of', True),
+        INDIRECT_DEVICE: ('indirectly of', True),
         PROCEDURE_DEVICE: ('involving', True),
         DIRECT_MORPHOLOGY: ('of', True),
         SURGICAL_APPROACH: ('via', True),
@@ -850,69 +864,32 @@ class MethodApplicationRenderer(RolePairRenderer):
         MEASUREMENT_METHOD: ('collected via', True),
         REVISION_STATUS: ('that is', True)
     }
-
+    method_object_relations = [DIRECT_SUBSTANCE, DIRECT_DEVICE, DIRECT_MORPHOLOGY, INDIRECT_DEVICE]
     using_device_relations = [USING_DEVICE, USING_SOME_DEVICE]
-
-    @classmethod
-    def relationships_to_skip(cls, non_isa_relationship_info):
-        to_skip = list(relationship_filter(non_isa_relationship_info,
-                                           cls.object_id + [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT],
-                                           getter_fn=relation_type_id))
-        # to_skip = list(filter(lambda i: relation_type_id(i) in (cls.object_id + [PROCEDURE_SITE_DIRECT,
-        #                                                                          PROCEDURE_SITE_INDIRECT]),
-        #                       non_isa_relationship_info)) #.filter(type_id__in=cls.object_id + [PROCEDURE_SITE_DIRECT,
-        #                                                 #                    PROCEDURE_SITE_INDIRECT])
-        method_rels = list(relationship_filter(non_isa_relationship_info,
-                                               [cls.target_id], getter_fn=relation_type_id))
-        # method_rels = list(filter(lambda i: relation_type_id(i) == cls.target_id,
-        #                           non_isa_relationship_info)) #.filter(type_id=cls.target_id)
-        if len(method_rels) in [0, 1]:
-            return to_skip
-        else:
-            method_rel = choice(method_rels)#.order_by('?').first()
-            return to_skip + list(relationship_filter(non_isa_relationship_info,
-                                                      [relation_id(method_rel)], getter_fn=relation_id))
-            # return to_skip + list(filter(lambda i: relation_id(i) != relation_id(method_rel),
-            #                              non_isa_relationship_info))#non_isa_relationships.exclude(id=method_rel.id)
 
     def get_method_groups(self):
         grouping = {}
-        for method_type_rel in relationship_filter(self.relationships,
-                                                   [self.target_id], getter_fn=relation_type_id):
+        isolated_non_target_rels = []
+        method_rels = list(relationship_filter(self.relationships, [self.target_id],
+                                               getter_fn=relation_type_id))
+        for method_type_rel in method_rels:
             group = relation_group(method_type_rel)
             method = (relation_destination_id(method_type_rel), relation_destination_name(method_type_rel))
-            proc_site_rels = list(relationship_filter(
-                                    relationship_filter(self.relationships,
-                                                        [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT,
-                                                         PROCEDURE_SITE], getter_fn=relation_type_id),
-                       [group], getter_fn=relation_group))
-            # proc_site_rels = self.relationships.filter(
-            #     type_id__in=[PROCEDURE_SITE_DIRECT,
-            #                  PROCEDURE_SITE_INDIRECT,
-            #                  PROCEDURE_SITE],
-            #     relationship_group=group).prefetch_related('destination__descriptions')
-            procedure_locations = [('directly ' if relation_type_id(rel) == PROCEDURE_SITE_DIRECT
-                                    else 'indirectly ' if relation_type_id(rel) == PROCEDURE_SITE_INDIRECT else '',
-                                    relation_destination_id(rel), relation_destination_name(rel))
-                                   for rel in proc_site_rels]
-            object_rels = list(relationship_filter(
-                                    relationship_filter(self.relationships,
-                                                        [t for t in self.object_id
-                                                         if t not in self.using_device_relations],
-                                                        getter_fn=relation_type_id),
-                         [group], getter_fn=relation_group))
-            # object_rels = self.relationships.filter(type_id__in=[t for t in self.object_id
-            #                                                      if t not in self.using_device_relations],
-            #                                         relationship_group=group).prefetch_related(
-            #     'destination__descriptions')
-            using_rels = list(relationship_filter(
-                                relationship_filter(
-                                    self.relationships,
-                                    self.using_device_relations, getter_fn=relation_type_id),
-                     [group], getter_fn=relation_group))
-            # using_rels = self.relationships.filter(type_id__in=self.using_device_relations,
-            #                                        relationship_group=group).prefetch_related(
-            #     'destination__descriptions')
+            #Other groups with other related (non-identifying) attributes
+            non_target_rels = list(relationship_filter(self.relationships, self.object_id + list(self.object_phrase),
+                                                       getter_fn=relation_type_id))
+            for other_group, group_rels in groupby(sorted(non_target_rels,
+                                                          key=relation_group), relation_group):
+                group_rels = list(group_rels)
+                if other_group not in map(relation_group, method_rels) and any(non_target_rels):
+                    isolated_non_target_rels.extend(group_rels)
+            if isolated_non_target_rels:
+                object_rels, procedure_locations, using_rels = self.get_method_components(None,
+                                                                                          isolated_non_target_rels)
+                grouping[None] = [(method, procedure_locations,
+                                   destination_id_and_full_name(using_rels[0]) if using_rels else None,
+                                   object_rels)]
+            object_rels, procedure_locations, using_rels = self.get_method_components(group)
             grouping.setdefault(group, []).append(
                 (method,
                  procedure_locations,
@@ -920,6 +897,31 @@ class MethodApplicationRenderer(RolePairRenderer):
                  object_rels)
             )
         return grouping
+
+    def get_method_components(self, group, isolated_non_target_rels=None):
+        proc_site_rels = [r for r in
+                          relationship_filter(isolated_non_target_rels if isolated_non_target_rels
+                                              else self.relationships,
+                                [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT,
+                                 PROCEDURE_SITE], getter_fn=relation_type_id)
+                          if relation_group(r) == group or isolated_non_target_rels]
+        procedure_locations = [('directly ' if relation_type_id(rel) == PROCEDURE_SITE_DIRECT
+                                else 'indirectly ' if relation_type_id(rel) == PROCEDURE_SITE_INDIRECT else '',
+                                relation_destination_id(rel), relation_destination_name(rel))
+                               for rel in proc_site_rels]
+        object_rels = [r for r in
+                       relationship_filter(isolated_non_target_rels if isolated_non_target_rels
+                                           else self.relationships,
+                                           [t for t in self.object_id
+                                            if t not in self.using_device_relations],
+                                           getter_fn=relation_type_id)
+                       if relation_group(r) == group or isolated_non_target_rels]
+        using_rels = [r for r in
+                      relationship_filter(isolated_non_target_rels if isolated_non_target_rels
+                                          else self.relationships, self.using_device_relations,
+                                          getter_fn=relation_type_id)
+                      if relation_group(r) == group or isolated_non_target_rels]
+        return object_rels, procedure_locations, using_rels
 
     def render(self, relationships=None):
         group_phrases = []
@@ -939,9 +941,12 @@ class MethodApplicationRenderer(RolePairRenderer):
                                                   concept_full_name=location_name)
                     location_phrases.append(f"{modifier}in {loc_phrase}")
                 if location_phrases:
-                    prefix = " "# if not method_rels.exists() else ""
+                    prefix = " "
                     conjoined_location_phrase = pretty_print_list(location_phrases, and_char=", and ")
-                    location_phrase = f"{prefix}occurring {conjoined_location_phrase}"
+                    if via_phrase or len(method_rels) > 1:
+                        location_phrase = f",{prefix}occurring {conjoined_location_phrase}"
+                    else:
+                        location_phrase = f"{prefix}occurring {conjoined_location_phrase}"
                 else:
                     location_phrase = ""
                 method_id, method_name = method
@@ -950,7 +955,24 @@ class MethodApplicationRenderer(RolePairRenderer):
                 prefix = "is " if not group_phrases else ""
                 if method_rels:
                     method_obj_phrases = []
-                    for method_rel in method_rels:
+                    direct_obj_info = []
+                    for method_rel in relationship_filter(method_rels,
+                                                          self.method_object_relations,
+                                                          relation_type_id):
+                        obj_id, obj_name = destination_id_and_full_name(method_rel)
+                        term, w_article = self.object_phrase[relation_type_id(method_rel)]
+                        obj_phrase = self.render_concept(with_indef_article=w_article,
+                                                         concept_id=obj_id, concept_full_name=obj_name)
+                        suffix = " (indirectly)" if relation_type_id(method_rel) == INDIRECT_DEVICE else ""
+                        direct_obj_info.append(
+                            f"{obj_phrase}{suffix}"
+                        )
+                    if direct_obj_info:
+                        obj_phrases = pretty_print_list(direct_obj_info, and_char=", and ")
+                        method_obj_phrases.append(f" of {obj_phrases}")
+                    for method_rel in relationship_exclude(method_rels,
+                                                          self.method_object_relations,
+                                                          relation_type_id):
                         obj_id, obj_name = destination_id_and_full_name(method_rel)
                         term, w_article = self.object_phrase[relation_type_id(method_rel)]
                         obj_phrase = self.render_concept(with_indef_article=w_article,
@@ -960,12 +982,14 @@ class MethodApplicationRenderer(RolePairRenderer):
                         method_obj_phrases.append(
                             f"{method_prefix}{term} {obj_phrase}{suffix}"
                         )
-                    method_obj_phrase = " ".join(method_obj_phrases)
+                    method_obj_phrase = ", ".join(method_obj_phrases)
                 else:
                     method_obj_phrase = ""
                 phrase = "{}{}{}{}{}".format(prefix, method_name, via_phrase, method_obj_phrase, location_phrase)
                 group_phrases.append(phrase)
-
+        if len(group_phrases) > 1:
+            return "{}.  {}".format(group_phrases[0],
+                                    ".  ".join(map(lambda i: f"It is {i}", group_phrases[1:])))
         return pretty_print_list(group_phrases, and_char=", and ")
 
     def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None):
@@ -1139,6 +1163,7 @@ ROLE_PHRASES = {
     HAS_FILLING: ('has {} filling', True),
     TEMPORALLY_RELATED_TO: ('is temporarily related to {}', True),
     HAS_COATING_MATERIAL: ('has {} coating', True),
+    HAS_DISPOSITION: ('plays the role of {}', True),
 }
 
 
