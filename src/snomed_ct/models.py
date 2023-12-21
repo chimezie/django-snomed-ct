@@ -19,6 +19,7 @@ except:
 
     cache = PassThruCache()
 
+
 def print_function_entry_and_exit(decorated_function):
     """
     Function decorator logging entry + exit and parameters of functions.
@@ -144,6 +145,9 @@ class ConceptQuerySet(CommonSNOMEDQuerySet):
 
     def has_definitions(self):
         return self.filter(text_definitions__isnull=False)
+
+    def definitions(self):
+        return TextDefinition.objects.all(concept__in=self.ids)
 
     def icd10_mappings(self):
         return ICD10_Mapping.objects.filter(referenced_component_id__in=self.ids)
@@ -518,6 +522,7 @@ FINDING_SITE = 363698007
 ASSOCIATED_MORPHOLOGY = 116676008
 PART_OF = 123005000
 
+
 class RelationshipQuerySet(CommonSNOMEDQuerySet):
     def sources(self):
         return Concept.objects.filter(id__in=self.values_list('source_id', flat='True'))
@@ -555,6 +560,9 @@ class RelationshipManager(SNOMEDCTModelManager):
 
     def by_type_ids(self, type_ids):
         return self.get_queryset().filter(type_id_in=type_ids)
+
+    def active(self):
+        return self.get_queryset().active
 
 
 ATTRIBUTE_HUMAN_READABLE_NAMES = {
@@ -832,6 +840,7 @@ class ICD10_MappingManager(models.Manager):
         # return self.get_queryset()
         query = reduce(or_, (Q(map_target__startswith=code, map_rule='TRUE') for code in codes))
         return self.get_queryset().filter(query)
+
 
 class ICD10_Mapping(ExtendedMapRefSet):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
