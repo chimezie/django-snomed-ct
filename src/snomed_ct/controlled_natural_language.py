@@ -3,6 +3,7 @@ django.setup()
 from itertools import groupby
 from snomed_ct.models import (ISA, ATTRIBUTE_HUMAN_READABLE_NAMES, pretty_print_list, Concept, ASSOCIATED_MORPHOLOGY,
                               FINDING_SITE, DESCRIPTION_TYPES, SNOMED_NAME_PATTERN, Description)
+from . import cnl_clauses
 from random import choice
 from django.db.models import Prefetch
 from abc import ABC, abstractmethod
@@ -250,10 +251,6 @@ class ComplexRenderer(SnomedNounRenderer):
 
 
 class DoseFormRenderer(ComplexRenderer):
-    """
-    HAS_DOSE_FORM_INTENDED_SITE: ('is given by {} administration', False),
-    HAS_DOSE_FORM_ADMINISTRATION_METHOD: ('is administered via {}', True),
-    """
     identifying_properties = [HAS_DOSE_FORM_ADMINISTRATION_METHOD, HAS_DOSE_FORM_RELEASE_CHARACTERISTIC]
     can_collapse_objects = False
     attributes = [HAS_DOSE_FORM_INTENDED_SITE, HAS_DOSE_FORM_TRANSFORMATION,
@@ -296,15 +293,15 @@ class DoseFormRenderer(ComplexRenderer):
                                                   [HAS_DOSE_FORM_RELEASE_CHARACTERISTIC],
                                                   getter_fn=relation_type_id))
         if dose_admin_method_rels:
-            phrases.append("is administered via {}".format(
+            phrases.append(cnl_clauses.ADMINISTERED_VIA.format(
                 self.render_concept(**render_object_concept_kwargs(dose_admin_method_rels[0]))
             ))
         if dose_release_rels:
-            phrases.append("is given by {}".format(
+            phrases.append(cnl_clauses.GIVEN_BY.format(
                 self.render_concept(**render_object_concept_kwargs(dose_release_rels[0]))
             ))
         if dose_site_rels:
-            phrases.append("is given by {} administration".format(
+            phrases.append(cnl_clauses.GIVEN_BY_ADMINISTRATION.format(
                 self.render_concept(**render_object_concept_kwargs(dose_site_rels[0])))
             )
         if dose_form_rels:
@@ -314,7 +311,7 @@ class DoseFormRenderer(ComplexRenderer):
                 transformation_name = self.render_concept(**render_object_concept_kwargs(transformation_rel),
                                                           no_id=True)
                 if transformation_id == self.NO_TRANSFORMATION:
-                    phrases.append("is administered as {}".format(
+                    phrases.append(cnl_clauses.ADMINISTERED_AS.format(
                         self.render_concept(with_indef_article=True,
                                             **render_object_concept_kwargs(dose_form_rels[0]))
                     ))
@@ -323,12 +320,12 @@ class DoseFormRenderer(ComplexRenderer):
                         transformation_id) or self.past_tense(transformation_name.lower())) + ", "
                     modified_phrase = transform_modifiers + self.render_concept(
                         **render_object_concept_kwargs(dose_form_rels[0]))
-                    phrases.append("is administered as {}".format(
+                    phrases.append(cnl_clauses.ADMINISTERED_AS.format(
                         prefix_with_indefinite_article(modified_phrase)
                     ))
 
             else:
-                phrases.append("is administered as {}".format(
+                phrases.append(cnl_clauses.ADMINISTERED_AS.format(
                     self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(dose_form_rels[0]))
                 ))
@@ -351,14 +348,14 @@ class ClinicalDrugRenderer(ComplexRenderer):
                                                   [HAS_DOSE_FORM],
                                                   getter_fn=relation_type_id))
         if unit_rels:
-            return "is presented as {} and {}".format(
+            return cnl_clauses.PRESENTED_AS_2.format(
                 self.render_concept(with_indef_article=True,
                                     **render_object_concept_kwargs(unit_rels[0])),
                 self.render_concept(with_indef_article=True,
                                     **render_object_concept_kwargs(dose_form_rels[0]))
             )
         else:
-            return "is presented as {}".format(
+            return cnl_clauses.PRESENTED.format(
                 self.render_concept(with_indef_article=True,
                                     **render_object_concept_kwargs(dose_form_rels[0])))
 
@@ -404,20 +401,20 @@ class MeasurableProductRenderer(ComplexRenderer):
                                                    [HAS_PRECISE_ACTIVE_INGREDIENT],
                                                    getter_fn=relation_type_id))
         phrases.extend([
-            'has {} as its basis of strength'.format(
+            cnl_clauses.BASIS_OF_STRENGTH.format(
                 self.render_concept(**render_object_concept_kwargs(strength_basis_rels[0]))
             ),
-            'contains {}'.format(
+            cnl_clauses.CONTAINS.format(
                 self.render_concept(**render_object_concept_kwargs(ingredient_rels[0]))
             ),
         ])
         if concentration_numerator_rels:
-            phrases.append('has a concentration measured in units of {} per {}'.format(
+            phrases.append(cnl_clauses.CONCENTRATION_UNITS.format(
                 self.render_concept(**render_object_concept_kwargs(concentration_numerator_rels[0])),
                 self.render_concept(**render_object_concept_kwargs(concentration_denominator_rels[0])),
             ))
         elif presentation_denominator_rels:
-            phrases.append('has a presentation strength measured in units of {} per {}'.format(
+            phrases.append(cnl_clauses.PRESENTATION_STRENGTH_UNITS.format(
                 self.render_concept(**render_object_concept_kwargs(presentation_numerator_rels[0])),
                 self.render_concept(**render_object_concept_kwargs(presentation_denominator_rels[0])),
             ))
@@ -473,7 +470,7 @@ class Pathophysiology(ComplexRenderer):
                     self.render_concept(**render_object_concept_kwargs(process))
                 )
             elif occurrence_name:
-                proc_phrase = "is {} occurring during {}".format(
+                proc_phrase = cnl_clauses.PROCESS_OCCURRENCE.format(
                     self.render_concept(with_indef_article=True, **render_object_concept_kwargs(process)),
                     prefix_with_indefinite_article(occurrence_name)
                 )
@@ -486,20 +483,20 @@ class Pathophysiology(ComplexRenderer):
                 self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
                                     with_indef_article=True)) if causal_rels else ""
             if occurrence_name and occurrence_is_modifier:
-                morph_phrase = "is characterized in form by {}{}{}".format(
+                morph_phrase = cnl_clauses.MODIFIED_OCCURRING_MORPHOLOGY.format(
                     prefix_with_indefinite_article(occurrence_name),
                     self.render_concept(**render_object_concept_kwargs(morph_rel)),
                     causal_phrase
                 )
             elif occurrence_name:
-                morph_phrase = "is characterized in form by {}{} occurring during {}".format(
+                morph_phrase = cnl_clauses.OCCURRING_MORPHOLOGY.format(
                     self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(morph_rel)),
                     causal_phrase,
                     prefix_with_indefinite_article(occurrence_name)
                 )
             else:
-                morph_phrase = "is characterized in form by {}{}".format(
+                morph_phrase = cnl_clauses.MORPHOLOGY.format(
                     self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(morph_rel)),
                     causal_phrase)
@@ -514,13 +511,13 @@ class Pathophysiology(ComplexRenderer):
                 self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
                                     with_indef_article=True)) if causal_rels else ""
             morph_rel = morph_rels[0]
-            morph_phrase = "characterized in form by {}{}".format(
+            morph_phrase = cnl_clauses.MORPHOLOGY2.format(
                 self.render_concept(with_indef_article=True,
                                     **render_object_concept_kwargs(morph_rel)),
                 causal_phrase)
         if location_rels:
             location_rel = location_rels[0]
-            location_phrase = "located in {}".format(
+            location_phrase = cnl_clauses.LOCATION.format(
                                 self.render_concept(with_indef_article=True,
                                                     **render_object_concept_kwargs((location_rel))))
         if proc_phrase:
@@ -573,20 +570,19 @@ class SpecimenRenderer(ComplexRenderer):
         collection_info_rels = list(relationship_filter(self.relationships, [SPECIMEN_SOURCE_TOPOGRAPHY,
                                                                              SPECIMEN_PROCEDURE],
                                                         getter_fn=relation_type_id)
-                                    )# self.relationships.filter(type_id__in=[SPECIMEN_SOURCE_TOPOGRAPHY, SPECIMEN_PROCEDURE])
+                                    )
         collection_conjunction = pretty_print_list(["{} {}".format(
             self.COLLECTION_PHRASES_MAP[relation_type_id(rel)],
             self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
                                 concept_full_name=relation_destination_name(rel)))
             for rel in collection_info_rels], and_char=", and ") if collection_info_rels else ""
-        for rel in list(relationship_filter(self.relationships, self.OTHER_PHRASES, getter_fn=relation_type_id)
-                        ):#self.relationships.filter(type_id__in=self.OTHER_PHRASES):
+        for rel in list(relationship_filter(self.relationships, self.OTHER_PHRASES, getter_fn=relation_type_id)):
             destination_name = self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
                                                    concept_full_name=relation_destination_name(rel))
             phrases.append(f"{self.OTHER_PHRASES[relation_type_id(rel)]} {destination_name}")
         if collection_info_rels:
-            return pretty_print_list([f"is collected {collection_conjunction}"] + phrases,
-                                     and_char=", and ")
+            return pretty_print_list([cnl_clauses.COLLECTION.format(collection_conjunction=collection_conjunction)] +
+                                     phrases, and_char=", and ")
         else:
             return pretty_print_list(phrases, and_char=", and ")
 
@@ -664,14 +660,6 @@ class SituationRenderer(ComplexRenderer):
                                                          getter_fn=relation_type_id))
         assoc_procedure = list(relationship_filter(relationships, [ASSOCIATED_PROCEDURE],
                                                    getter_fn=relation_type_id))
-        # subject = relationships.filter(type=SUBJECT_RELATIONSHIP_CONTEXT).destinations().prefetch_related(
-        #     'descriptions')
-        # temporal_ctx_concept = relationships.filter(type=TEMPORAL_CONTEXT).destinations()
-        # finding_ctx_concept = relationships.filter(type=FINDING_CONTEXT).destinations()
-        # procedure_ctx_concept = relationships.filter(type=PROCEDURE_CONTEXT).destinations().prefetch_related(
-        #     'descriptions')
-        # assoc_procedure = relationships.filter(type=ASSOCIATED_PROCEDURE).destinations().prefetch_related(
-        #     'descriptions')
         proc_reworded_modifier = None
         proc_context = None
         if temporal_ctx_concept:
@@ -724,8 +712,6 @@ class SituationRenderer(ComplexRenderer):
 
         assoc_finding = list(relationship_filter(relationships, [ASSOCIATED_FINDING],
                                                  getter_fn=relation_type_id))
-        # assoc_finding = relationships.filter(type=ASSOCIATED_FINDING).destinations().prefetch_related(
-        #     'descriptions')
         if assoc_procedure:
             proc = assoc_procedure[0]
             rendered_proc = self.render_concept(concept_id=relation_destination_id(proc),
@@ -742,13 +728,9 @@ class SituationRenderer(ComplexRenderer):
                                                   concept_id=relation_destination_id(proc),
                                                   concept_full_name=relation_destination_name(proc))
             if subject_phrase:
-                return "a situation involving {subject_phrase} and {prefix}{procedure}".format(
-                    prefix=prefix,
-                    procedure=proc_phrase,
-                    subject_phrase=subject_phrase
-                )
+                return cnl_clauses.SITUATION_PHRASE.format(subject_phrase, prefix,proc_phrase)
             else:
-                return "a situation involving {prefix}{procedure}".format(prefix=prefix, procedure=proc_phrase)
+                return cnl_clauses.SITUATION_PHRASE2.format(prefix, proc_phrase)
         else:
             if assoc_finding:
                 finding = assoc_finding[0]
@@ -800,7 +782,6 @@ class RolePairRenderer(SnomedNounRenderer):
 
     def interpretation_subject_name(self, concept):
         raise NotImplemented("..")
-        # return self.render_concept(concept)
 
     @abstractmethod
     def render(self, relationships=None):
@@ -817,7 +798,7 @@ class InterpretationRolePairRenderer(RolePairRenderer):
                                                  getter_fn=relation_type_id):
             group = relation_group(interpret_rel)
             interpreted = (relation_destination_id(interpret_rel),
-                           relation_destination_name(interpret_rel))# interpret_rel.destination
+                           relation_destination_name(interpret_rel))
             object_rels = list(
                 relationship_filter(relationship_filter(self.relationships, self.object_id, getter_fn=relation_type_id),
                                     [group], getter_fn=relation_group)
@@ -836,7 +817,8 @@ class InterpretationRolePairRenderer(RolePairRenderer):
                                                      object_rels)), and_char=", and ") if object_rels else None
                 interpretation_outcome = f" as {targets}" if targets else ""
                 prefix = "is " if not phrases else ""
-                phrases.append(f"{prefix}an interpretation of {interpreted}{interpretation_outcome}")
+                phrases.append(
+                    cnl_clauses.INTERPRETATION.format(prefix, interpreted, interpretation_outcome))
 
         return pretty_print_list(phrases, and_char=", and ")
 
@@ -944,9 +926,11 @@ class MethodApplicationRenderer(RolePairRenderer):
                     prefix = " "
                     conjoined_location_phrase = pretty_print_list(location_phrases, and_char=", and ")
                     if via_phrase or len(method_rels) > 1:
-                        location_phrase = f",{prefix}occurring {conjoined_location_phrase}"
+                        location_phrase = cnl_clauses.METHOD_OCCURRING_1.format(prefix,
+                                                                                conjoined_location_phrase)
                     else:
-                        location_phrase = f"{prefix}occurring {conjoined_location_phrase}"
+                        location_phrase = cnl_clauses.METHOD_OCCURRING_2.format(prefix,
+                                                                                conjoined_location_phrase)
                 else:
                     location_phrase = ""
                 method_id, method_name = method
@@ -1087,19 +1071,19 @@ class AlternativeNameRoleRenderer(RoleRenderer):
 class OccursRenderer(RoleRenderer):
     def render(self, relationships=None):
         if relation_destination_id(self.relationship) == TODDLER_PERIOD:
-            return "occurs as a toddler"
+            return cnl_clauses.TODDLER_OCCURRENCE
         elif relation_destination_id(self.relationship) == NEO_NATAL_PERIOD:
-            return "occurs during neonatal period"
+            return cnl_clauses.NEONATAL_OCCURRENCE
         elif relation_destination_id(self.relationship) == CONGENITAL:
             return "is congenital"
         else:
             dest_id, dest_name = destination_id_and_full_name(self.relationship)
             dest_phrase = self.render_concept(with_indef_article=True, concept_id=dest_id, concept_full_name=dest_name)
-            return f"occurs during {dest_phrase}"
+            return cnl_clauses.OTHER_OCCURRENCE.format(dest_phrase)
 
 
 class SiteRenderer(RoleRenderer):
-    LOCATION_PHRASE = ' located in'
+    LOCATION_PHRASE = cnl_clauses.LOCATION_2
 
     def __init__(self, relationship, id_reference=False, with_article=False):
         super().__init__(relationship, id_reference=id_reference, with_article=with_article)
@@ -1121,7 +1105,7 @@ class SiteRenderer(RoleRenderer):
 
 
 class ProcedureSiteRendere(SiteRenderer):
-    LOCATION_PHRASE = ' performed in'
+    LOCATION_PHRASE = cnl_clauses.PERFORMANCE_LOCATION
 
 
 def prefix_with_indefinite_article(term, unquoted=True):
@@ -1129,41 +1113,41 @@ def prefix_with_indefinite_article(term, unquoted=True):
 
 
 ROLE_PHRASES = {
-    REALIZATION: ('is realized as {}', True),
-    COMPONENT: ('comprises {}', True),
-    HAS_COMPOSITIONAL_MATERIAL: ('comprises {}', False),
-    ASSOCIATED_WITH: ('is associated with {}', True),
-    PROCEDURE_DEVICE: ('involves {}', True),
-    DEVICE_INTENDED_SITE: ('is intended for use in {}', True),
-    PROCEDURE_MORPHOLOGY: ('involves {}', True),
-    PROCEDURE_SITE: ('occurs in {}', True),
-    FINDING_METHOD: ('a finding by {}', True),
-    FINDING_INFORMER: ('a finding informed by {}', True),
-    HAS_FOCUS: ('is focused on {}', True),
-    RECIPIENT_CATEGORY: ('benefits {}', True),
-    ROUTE_OF_ADMINISTRATION: ('is administered via {}', True),
-    HAS_SPECIMEN: ('evaluates {}', True),
-    LATERALITY: ('is located on {}', True),
-    HAS_ACTIVE_INGREDIENT: ('contains {}', False),
-    HAS_TARGET_POPULATION: ('It targets {}', True),
-    PLAYS_ROLE: ('plays {}', True),
-    HAS_DOSE_FORM_RELEASE_CHARACTERISTIC: ('is administered via {}', False),
-    UNITS: ('Each of its units are {}', True),
-    PRECONDITION: ('requires {}', True),
-    HAS_PRECISE_ACTIVE_INGREDIENT: ('contains {}', False),
-    PROCESS_DURATION: ('it lasts for {}', False),
-    TECHNIQUE: ('it involves {}', True),
-    IS_MODIFICATION_OF: ('is a modification of {}', False),
-    HAS_STATE_OF_MATTER: ('is {}', True),
-    PROCESS_OUTPUT: ('produces {}', True),
-    PROPERTY: ('is {}', True),
-    PROCESS_ACTS_ON: ('involves {}', True),
-    BEFORE: ('precedes {}', True),
-    HAS_SURFACE_TEXTURE: ('has {} surface texture', True),
-    HAS_FILLING: ('has {} filling', True),
-    TEMPORALLY_RELATED_TO: ('is temporarily related to {}', True),
-    HAS_COATING_MATERIAL: ('has {} coating', True),
-    HAS_DISPOSITION: ('plays the role of {}', True),
+    REALIZATION: (cnl_clauses.REALIZATION_PHRASE, True),
+    COMPONENT: (cnl_clauses.COMPONENT_PHRASE, True),
+    HAS_COMPOSITIONAL_MATERIAL: (cnl_clauses.COMPONENT_PHRASE, False),
+    ASSOCIATED_WITH: (cnl_clauses.ASSOCIATED_WITH_PHRASE, True),
+    PROCEDURE_DEVICE: (cnl_clauses.INVOLVES_PHRASE, True),
+    DEVICE_INTENDED_SITE: (cnl_clauses.DEVICE_INTENDED_SITE_PHRASE, True),
+    PROCEDURE_MORPHOLOGY: (cnl_clauses.INVOLVES_PHRASE, True),
+    PROCEDURE_SITE: (cnl_clauses.PROCEDURE_SITE_PHRASE, True),
+    FINDING_METHOD: (cnl_clauses.FINDING_METHOD_PHRASE, True),
+    FINDING_INFORMER: (cnl_clauses.FINDING_INFORMER_PHRASE, True),
+    HAS_FOCUS: (cnl_clauses.HAS_FOCUS_PHRASE, True),
+    RECIPIENT_CATEGORY: (cnl_clauses.RECIPIENT_CATEGORY_PHRASE, True),
+    ROUTE_OF_ADMINISTRATION: (cnl_clauses.ADMINISTERED_VIA, True),
+    HAS_SPECIMEN: (cnl_clauses.HAS_SPECIMEN_PHRASE, True),
+    LATERALITY: (cnl_clauses.LATERALITY_PHRASE, True),
+    HAS_ACTIVE_INGREDIENT: (cnl_clauses.CONTAINS, False),
+    HAS_TARGET_POPULATION: (cnl_clauses.HAS_TARGET_POPULATION_PHRASE, True),
+    PLAYS_ROLE: (cnl_clauses.PLAYS_ROLE_PHRASE, True),
+    HAS_DOSE_FORM_RELEASE_CHARACTERISTIC: (cnl_clauses.ADMINISTERED_VIA, False),
+    UNITS: (cnl_clauses.UNITS_PHRASE, True),
+    PRECONDITION: (cnl_clauses.PRECONDITION_PHRASE, True),
+    HAS_PRECISE_ACTIVE_INGREDIENT: (cnl_clauses.CONTAINS, False),
+    PROCESS_DURATION: (cnl_clauses.PROCESS_DURATION_PHRASE, False),
+    TECHNIQUE: (cnl_clauses.TECHNIQUE_PHRASE, True),
+    IS_MODIFICATION_OF: (cnl_clauses.IS_MODIFICATION_OF_PHRASE, False),
+    HAS_STATE_OF_MATTER: (cnl_clauses.ISA_PHRASE, True),
+    PROCESS_OUTPUT: (cnl_clauses.PROCESS_OUTPUT_PHRASE, True),
+    PROPERTY: (cnl_clauses.ISA_PHRASE, True),
+    PROCESS_ACTS_ON: (cnl_clauses.PROCESS_ACTS_ON_PHRASE, True),
+    BEFORE: (cnl_clauses.BEFORE_PHRASE, True),
+    HAS_SURFACE_TEXTURE: (cnl_clauses.HAS_SURFACE_TEXTURE_PHRASE, True),
+    HAS_FILLING: (cnl_clauses.HAS_FILLING_PHRASE, True),
+    TEMPORALLY_RELATED_TO: (cnl_clauses.TEMPORALLY_RELATED_TO_PHRASE, True),
+    HAS_COATING_MATERIAL: (cnl_clauses.HAS_COATING_MATERIAL_PHRASE, True),
+    HAS_DISPOSITION: (cnl_clauses.HAS_DISPOSITION_PHRASE, True),
 }
 
 
@@ -1171,14 +1155,14 @@ def get_renderer(relationship, relationships, id_reference=False):
     if relation_type_id(relationship) in [OCCURRENCE, DURING]:
         return OccursRenderer(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) == HAS_INTENT:
-        return AlternativeNameRoleRenderer('is intended as/for', relationship,
+        return AlternativeNameRoleRenderer(cnl_clauses.INTENDED_PHRASE, relationship,
                                            id_reference=id_reference)
     elif relation_type_id(relationship) in [HAS_INTERPRETATION, CLINICAL_COURSE, SEVERITY, PRIORITY, SCALE_TYPE,
                                             HAS_ABSORBABILITY]:
         return RelationshipAsIsaRenderer(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) in [DUE_TO, CAUSATIVE_AGENT]:
         obj = RoleRenderer(relationship, id_reference=id_reference)
-        obj.role_phrase = 'is caused by'
+        obj.role_phrase = cnl_clauses.CAUSED_BY_PHRASE
         return obj
     elif relation_type_id(relationship) in ROLE_PAIR_RENDERER_MAPPING:
         render_class = ROLE_PAIR_RENDERER_MAPPING[relation_type_id(relationship)]
@@ -1186,7 +1170,7 @@ def get_renderer(relationship, relationships, id_reference=False):
         return obj
     elif relation_type_id(relationship) == AFTER:
         obj = RoleRenderer(relationship, id_reference=id_reference)
-        obj.role_phrase = 'follows'
+        obj.role_phrase = cnl_clauses.FOLLOWS_PHRASE
         return obj
     elif relation_type_id(relationship) in [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT, PROCEDURE_SITE]:
         return ProcedureSiteRendere(relationship, id_reference=id_reference)
