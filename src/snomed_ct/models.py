@@ -800,7 +800,7 @@ class ExtendedMapRefSet(CommonSNOMEDModel):
     map_priority = models.SmallIntegerField(db_column='mapPriority')
     map_rule = models.TextField(default="", db_column='mapRule')
     map_advice = models.TextField(default="", db_column='mapAdvice')
-    map_target = models.TextField(default="", db_column='mapTarget')
+    map_target = models.TextField(default="", db_column='mapTarget', db_index=True)
     correlation = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='+', blank=True,
                                     db_column='correlationId', null=True)
     map_category = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='+', blank=True, null=True,
