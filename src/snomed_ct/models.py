@@ -62,12 +62,15 @@ def pretty_print_list(my_list, sep=", ", and_char=", & "):
         my_list[0], my_list[1]
     ) if len(my_list) == 2 else my_list[0]
 
+
 class TextSearchTypes(Enum):
     CASE_INSENSITIVE_CONTAINS = 1
     CASE_SENSITIVE_CONTAINS = 2
     CASE_SENSITIVE_REGEX = 2
     CASE_INSENSITIVE_REGEX = 3
     POSTGRES_FULL_TEXT_SEARCH = 4
+    ENDSWITH_SENSITIVE = 5
+    ENDSWITH_INSENSITIVE = 5
 
     @classmethod
     def get_search_query_suffix(cls, search_type):
@@ -83,6 +86,8 @@ def GetSearchQuerySuffix(search_type):
                     'regex' if search_type == TextSearchTypes.CASE_SENSITIVE_REGEX else
                     'contains' if search_type == TextSearchTypes.CASE_SENSITIVE_CONTAINS else
                     'icontains' if search_type == TextSearchTypes.CASE_INSENSITIVE_CONTAINS else
+                    'endswith' if search_type == TextSearchTypes.ENDSWITH_SENSITIVE else
+                    'iendswith' if search_type == TextSearchTypes.ENDSWITH_INSENSITIVE else
                     'search')
     return query_suffix
 
@@ -168,8 +173,7 @@ class ConceptManager(SNOMEDCTModelManager):
         query_suffix = GetSearchQuerySuffix(search_type)
         kwargs = {'term__{}'.format(query_suffix): search_string,
                   'type_id': DESCRIPTION_TYPES['Fully specified name']}
-        return self.get_queryset().filter(id__in=Description.objects.filter(**kwargs).values_list('concept_id',
-                                                                                                  flat=True))
+        return Description.objects.filter(**kwargs).concepts
 
     def mapped(self):
         return self.get_queryset().filter(pk__in=ICD10_Mapping.objects.all().values_list('referenced_component__pk',
