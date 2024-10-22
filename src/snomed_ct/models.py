@@ -1,5 +1,6 @@
 from enum import Enum
 import uuid
+import functools
 import re
 from django.core.cache import caches
 from functools import reduce
@@ -26,7 +27,7 @@ def print_function_entry_and_exit(decorated_function):
 
     Entry and exit as logging.info, parameters as logging.DEBUG.
     """
-    import inspect, time, functools
+    import inspect
 
     @functools.wraps(decorated_function)
     def wrapper(*dec_fn_args, **dec_fn_kwargs):
@@ -338,13 +339,17 @@ class Concept(CommonSNOMEDModel):
         # return Concept.objects.filter(id__in=self.inbound_relationships()
         #                               .filter(type_id=PART_OF).values_list('source', flat=True))
 
+    @functools.cache
     def isa_transitive(self, chain=None, **kwargs):
-        chain = chain if chain else []
+        chain = chain if chain else ()
+        if self.id in chain:
+            return tuple(chain)
+
         rt = [self.id]
         if self.id != 404684003 and self.id not in chain:
-            for concept in self.isa:
-                rt.extend(concept.isa_transitive(rt, **kwargs))
-        return chain + rt
+            for concept in self.isa.exclude(id__in=chain):
+                rt = list(concept.isa_transitive(tuple(rt), **kwargs)) + rt
+        return tuple(rt + list(chain))
 
     def transitive_general_concept(self):
         return self.transitive_isa.general_concepts
@@ -395,6 +400,10 @@ class DescriptionQuerySet(CommonSNOMEDQuerySet):
         return self.filter(type_id=DESCRIPTION_TYPES['Fully specified name'])
 
     @property
+    def other_names(self):
+        return self.exclude(type_id=DESCRIPTION_TYPES['Fully specified name'])
+
+    @property
     def concepts(self):
         return Concept.by_ids(set(self.values_list('concept__id', flat=True)))
 
@@ -421,6 +430,10 @@ class DescriptionManager(SNOMEDCTModelManager):
     @property
     def synonyms(self):
         return self.get_queryset().synonyms
+
+    @property
+    def active(self):
+        return self.get_queryset().active
 
 class TransitiveClosureQuerySet(CommonSNOMEDQuerySet):
     @property
@@ -827,6 +840,10 @@ class ICD10_MappingQuerySet(CommonSNOMEDQuerySet):
     @property
     def concepts(self):
         return Concept.objects.filter(id__in=self.values_list('referenced_component', flat=True))
+
+    def with_active_concepts(self):
+        return self.filter(referenced_component__active=True)
+
 class ICD10_MappingManager(models.Manager):
     def get_queryset(self):
         return ICD10_MappingQuerySet(self.model)

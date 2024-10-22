@@ -15,10 +15,8 @@ from datetime import date, datetime
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, connection
-from glob import glob
-import argparse
 import re
-from zipfile import ZipFile, Path as ZipPath, BadZipFile
+from zipfile import ZipFile, Path as ZipPath
 from snomed_ct.models import Concept, Description, TextDefinition, Relationship, ICD10_Mapping, TransitiveClosure
 
 INTERNATIONAL_FILENAME_COMPONENT = '_INT_'
