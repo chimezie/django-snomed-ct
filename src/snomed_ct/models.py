@@ -58,9 +58,10 @@ def print_function_entry_and_exit(decorated_function):
     return wrapper
 
 
-def pretty_print_list(my_list, sep=", ", and_char=", & "):
-    return and_char.join([sep.join(my_list[:-1]), my_list[-1]]) if len(my_list) > 2 else '{} and {}'.format(
-        my_list[0], my_list[1]
+def pretty_print_list(my_list, sep=", ", and_char=", & ", binary_op='and'):
+    return and_char.join([sep.join(my_list[:-1]), my_list[-1]]) \
+        if len(my_list) > 2 else '{} {} {}'.format(
+        my_list[0], binary_op, my_list[1]
     ) if len(my_list) == 2 else my_list[0]
 
 
@@ -243,11 +244,15 @@ class Concept(CommonSNOMEDModel):
         return "Every '{}' is {}".format(self.fully_specified_name_no_type, definition_text)
 
     @property
-    def fully_specified_name_no_type(self):
+    def concepts(self):
         return SNOMED_NAME_PATTERN.search(self.get_fully_specified_name().term).group('name')
 
     def fully_specified_name_and_type(self, pattern=SNOMED_NAME_PATTERN):
         return pattern.search(self.get_fully_specified_name().term).groups()
+
+    @property
+    def fully_specified_name_no_type(self):
+        return SNOMED_NAME_PATTERN.search(self.get_fully_specified_name().term).group('name')
 
     @property
     def fully_specified_name(self):
