@@ -2,7 +2,7 @@ import django
 django.setup()
 from itertools import groupby
 from snomed_ct.models import (ISA, ATTRIBUTE_HUMAN_READABLE_NAMES, pretty_print_list, Concept, ASSOCIATED_MORPHOLOGY,
-                              FINDING_SITE, DESCRIPTION_TYPES, SNOMED_NAME_PATTERN, Description)
+                              FINDING_SITE, SNOMED_NAME_PATTERN, Description)
 from . import cnl_clauses
 from random import choice
 from django.db.models import Prefetch
@@ -23,6 +23,7 @@ except:
 
     cache = PassThruCache()
 
+PART_OF_TRANSITIVE_ENTAILMENT = False
 
 def non_isa_relationship_tuples(concept):
     pf=Prefetch('destination__descriptions',
@@ -138,8 +139,6 @@ LATERALITY = 272741003
 HAS_ACTIVE_INGREDIENT = 127489000
 HAS_DOSE_FORM = 411116001
 
-MASS_NOUN_LIKE_TYPES = ['organism']
-
 #Missing from Model
 SURGICAL_APPROACH = 424876005
 ACCESS = 260507000
@@ -196,14 +195,43 @@ HAS_DISPOSITION = 726542003
 class MalformedSNOMEDExpressionError(Exception):
     pass
 
-
 class SnomedNounRenderer(ABC):
+    MASS_NOUN_TOKEN_EXCEPTIONS = ['process']
+    MASS_NOUN_LIKE_TYPES = ['organism']
 
     def __init__(self, id_reference=False):
         self.id_reference = id_reference
 
+    def concept_name_root_token(self, concept_name):
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+        except (OSError, ImportError):
+            nlp = None
+
+        for tok in nlp(concept_name):
+            if tok.dep_ == 'ROOT':
+                return tok
+
+    def concept_token_features(self, concept_name):
+        tok = self.concept_name_root_token(concept_name)
+        if tok.tag_ == "VBG":
+            return "gerund"
+        elif tok.pos_ == "NOUN" and "Number=Sing" in tok.morph and tok not in self.MASS_NOUN_TOKEN_EXCEPTIONS:
+            return "mass noun"
+        elif tok.tag_ == "NNS" and "Number=Plur" in tok.morph:
+            return "plural noun"
+        elif tok.pos_ == "NOUN" and "Number=Sing" in tok.morph:
+            return "singular noun"
+
     def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None,
                        no_id=False):
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+        except (OSError, ImportError):
+            nlp = None
+
         if concept_id:
             concept_name, concept_type = SNOMED_NAME_PATTERN.search(concept_full_name).groups()
         else:
@@ -218,8 +246,15 @@ class SnomedNounRenderer(ABC):
             concept_name = concept_name.split(', device')[0]
         if concept_type in ('TNM', 'observable entity'):
             concept_name = concept_name.split(' observable')[0]
+        if concept_type == 'observable entity' and concept_name.endswith(', function'):
+            concept_name = concept_name.split(', function')[0]
 
-        if concept_type not in MASS_NOUN_LIKE_TYPES and with_indef_article:
+        if nlp is None:
+            use_article = concept_type not in self.MASS_NOUN_LIKE_TYPES
+        else:
+            token_features = self.concept_token_features(concept_name)
+            use_article = token_features not in ('gerund', 'mass noun', 'plural noun', 'singular noun')
+        if use_article and with_indef_article:
             concept_name_phrase = prefix_with_indefinite_article(concept_name)
         else:
             concept_name_phrase = concept_name
@@ -699,7 +734,7 @@ class SituationRenderer(ComplexRenderer):
                                     proc_reworded_modifier]) if proc_reworded_modifier else temporal_ctx_phrase
                 prefix += " "
         elif temporal_ctx_phrase:
-            assert finding_or_proc_article #Test with temporal context, 410545000 proc context,
+            assert finding_or_proc_article
             article_phrase = f" {finding_or_proc_article} " if finding_or_proc_article else ""
             prefix = "".join([temporal_ctx_phrase, article_phrase, f"{finding_or_proc_modifier}"])
             prefix = prefix.strip() + " "
@@ -830,6 +865,18 @@ class MethodApplicationRenderer(RolePairRenderer):
                  MEASUREMENT_METHOD, REVISION_STATUS, INDIRECT_MORPHOLOGY, USING_DEVICE,
                  INDIRECT_DEVICE]
 
+    method_renaming_map = {
+        # 261197005: "", #Doppler color flow - action
+        261198000: "diagnostic procedure by continuous wave doppler", #Doppler continuous wave - action
+        261199008: "diagnostic procedure by pulsed doppler", #Doppler pulsed - action,
+        424208002: "shunting", #424208002|Shunt - action
+        360323003: "restoration", #Restore - action
+        360270004: -1, #Therapy - action                XXX -1 value indicates not using an article
+        257786008: -1, #Cryotherapy - action
+        313029009: -1, #Brachytherapy - action
+        1193917004: "creation of a flap", #Flap creation - action
+    }
+
     object_phrase = {
         DIRECT_SUBSTANCE: ('of', True),
         DIRECT_DEVICE: ('of', True),
@@ -848,6 +895,28 @@ class MethodApplicationRenderer(RolePairRenderer):
     }
     method_object_relations = [DIRECT_SUBSTANCE, DIRECT_DEVICE, DIRECT_MORPHOLOGY, INDIRECT_DEVICE]
     using_device_relations = [USING_DEVICE, USING_SOME_DEVICE]
+
+    @classmethod
+    def relationships_to_skip(cls, non_isa_relationship_info):
+        obj_rels_to_skip = []
+        target_rel = None
+        relations = list(relationship_filter(non_isa_relationship_info, [cls.target_id] + cls.object_id +
+                                             [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT, PROCEDURE_SITE],
+                                             getter_fn=relation_type_id))
+        for group, group_rels in groupby(sorted(relations, key=relation_group), relation_group):
+            group_rels = list(group_rels)
+            targets_in_group = list(relationship_filter(group_rels, [cls.target_id],
+                                                        getter_fn=relation_type_id))
+            objects_in_group = list(relationship_filter(group_rels, cls.object_id + [PROCEDURE_SITE_DIRECT,
+                                                                                     PROCEDURE_SITE_INDIRECT,
+                                                                                     PROCEDURE_SITE],
+                                                        getter_fn=relation_type_id))
+            if objects_in_group:
+                obj_rels_to_skip.extend(objects_in_group)
+            if target_rel is None and targets_in_group:
+                target_rel = choice(targets_in_group)
+            obj_rels_to_skip.extend([t for t in targets_in_group if relation_id(t) != relation_id(target_rel)])
+        return obj_rels_to_skip
 
     def get_method_groups(self):
         grouping = {}
@@ -916,11 +985,11 @@ class MethodApplicationRenderer(RolePairRenderer):
                                                           concept_full_name=using_name)
                 else:
                     used_obj_phrase = ''
-                via_phrase = f' using {used_obj_phrase}' if using_obj else ''
+                via_phrase = cnl_clauses.USING_PHRASE.format(used_obj_phrase) if using_obj else ''
                 location_phrases = []
                 for modifier, location_id, location_name in proc_locs:
                     loc_phrase = self.render_concept(with_indef_article=True, concept_id=location_id,
-                                                  concept_full_name=location_name)
+                                                     concept_full_name=location_name)
                     location_phrases.append(f"{modifier}in {loc_phrase}")
                 if location_phrases:
                     prefix = " "
@@ -934,8 +1003,7 @@ class MethodApplicationRenderer(RolePairRenderer):
                 else:
                     location_phrase = ""
                 method_id, method_name = method
-                method_name = self.render_concept(with_indef_article=True, concept_id=method_id,
-                                                  concept_full_name=method_name)
+                method_name = self.get_method_name(method_id, method_name)
                 prefix = "is " if not group_phrases else ""
                 if method_rels:
                     method_obj_phrases = []
@@ -975,6 +1043,15 @@ class MethodApplicationRenderer(RolePairRenderer):
             return "{}.  {}".format(group_phrases[0],
                                     ".  ".join(map(lambda i: f"It is {i}", group_phrases[1:])))
         return pretty_print_list(group_phrases, and_char=", and ")
+
+    def get_method_name(self, method_id, method_name):
+        method_rename_info = self.method_renaming_map.get(method_id)
+        if method_rename_info == -1:
+            return self.render_concept(with_indef_article=False, concept_id=method_id, concept_full_name=method_name)
+        elif method_rename_info:
+            return prefix_with_indefinite_article(self.method_renaming_map[method_id])
+        else:
+            return self.render_concept(with_indef_article=True, concept_id=method_id, concept_full_name=method_name)
 
     def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None):
         if concept_id:
@@ -1087,13 +1164,14 @@ class SiteRenderer(RoleRenderer):
 
     def __init__(self, relationship, id_reference=False, with_article=False):
         super().__init__(relationship, id_reference=id_reference, with_article=with_article)
-        # self.anatomical_sites = [self.render_concept(relationship.destination)]
-        self.anatomical_sites = [self.render_concept(Concept.by_id(i), with_indef_article=True)
-                                 for i in set(
-                                            Concept.by_id(relation_destination_id(relationship)).part_of_transitive())]
+        destination_id = relation_destination_id(relationship)
+        if PART_OF_TRANSITIVE_ENTAILMENT:
+            self.anatomical_sites = [self.render_concept(Concept.by_id(i), with_indef_article=True)
+                                     for i in set(Concept.by_id(destination_id).part_of_transitive())]
+        else:
+            self.anatomical_sites = [self.render_concept(Concept.by_id(destination_id))]
         if not self.anatomical_sites:
-            self.anatomical_sites = [self.render_concept(Concept.by_id(relation_destination_id(relationship)),
-                                                         with_indef_article=True)]
+            self.anatomical_sites = [self.render_concept(Concept.by_id(destination_id), with_indef_article=True)]
         self.is_lengthy = len(self.anatomical_sites) > 1
 
     def render(self, relationships=None):
@@ -1104,12 +1182,22 @@ class SiteRenderer(RoleRenderer):
         )
 
 
-class ProcedureSiteRendere(SiteRenderer):
+class ProcedureSiteRenderer(SiteRenderer):
     LOCATION_PHRASE = cnl_clauses.PERFORMANCE_LOCATION
 
 
 def prefix_with_indefinite_article(term, unquoted=True):
-    return f"{'an' if term[0].lower() in 'aeiou' else 'a'} " + (term if unquoted else f"'{term}'")
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+    except (OSError, ImportError):
+        nlp = None
+    _term = (term if unquoted else f"'{term}'")
+    if nlp is not None:
+        for token in nlp(term):
+            if token.tag_ == 'VBG':
+                return _term
+    return f"{'an' if term[0].lower() in 'aeiou' else 'a'} " + _term
 
 
 ROLE_PHRASES = {
@@ -1173,7 +1261,7 @@ def get_renderer(relationship, relationships, id_reference=False):
         obj.role_phrase = cnl_clauses.FOLLOWS_PHRASE
         return obj
     elif relation_type_id(relationship) in [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT, PROCEDURE_SITE]:
-        return ProcedureSiteRendere(relationship, id_reference=id_reference)
+        return ProcedureSiteRenderer(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) in [FINDING_SITE, INHERENT_LOCATION, PROCESS_EXTENDS]:
         return SiteRenderer(relationship, id_reference=id_reference)
     else:
