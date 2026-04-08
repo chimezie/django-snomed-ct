@@ -1,9 +1,9 @@
 [project]
 name = "django-snomed-ct"
 description = "A Django App for storing, managing, and querying SNOMED CT by itself or as part of a Django application."
-version = "0.5"
+version = "0.5.2"
 readme = "README.md"
-requires-python = ">=3.10"
+
 license = {file = "LICENSE"}
 keywords = []
 authors = [
@@ -17,7 +17,17 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "django>=4.2,<5",
+  "django>=5.2",
+]
+
+[project.optional-dependencies]
+vector-db = [
+  "en-core-sci-lg @ https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz",
+  "sentence_transformers",
+  "numpy<2.0",
+  "spacy==3.7.5",
+  "scispacy==0.6.2",
+  "ogbujipt",
 ]
 
 [build-system]
@@ -26,3 +36,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu" },
+]
+torchaudio = [
+    { index = "pytorch-cpu" },
+]
