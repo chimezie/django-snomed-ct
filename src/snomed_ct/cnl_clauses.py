@@ -1,5 +1,4 @@
 import re
-import warnings
 from functools import partial
 
 
@@ -41,6 +40,7 @@ INVOLVES_PHRASE = "involves {}"
 DEVICE_INTENDED_SITE_PHRASE = "is intended for use in {}"
 PROCEDURE_SITE_PHRASE = "occurs in {}"
 FINDING_METHOD_PHRASE = "is a finding by {}"
+PROCEDURE_APPROACH_PHRASE = "via {}"
 FINDING_INFORMER_PHRASE = "is a finding informed by {}"
 HAS_FOCUS_PHRASE = "is focused on {}"
 RECIPIENT_CATEGORY_PHRASE = "benefits {}"
@@ -70,6 +70,7 @@ INTENDED_PHRASE = "is intended as/for"
 CAUSED_BY_PHRASE = "is caused by"
 FOLLOWS_PHRASE = "follows"
 
+SUBJECT_OF_RECORD = 410604004
 
 def pattern_and_num_objects(phrase, whole_sentence=True):
     phrase = phrase.replace(" ", "\\s")
@@ -285,6 +286,9 @@ CLAUSE_INSTRUCTION_AND_PATTERN = {
                     "It ")]
 }
 
+INSTRUCTIONS_TO_SKIP = {
+    SITUATION_PHRASE: "subject of record"
+}
 
 def pattern_to_instruction():
     return {pattern_or_fn: (instruction, phrase, prefix)

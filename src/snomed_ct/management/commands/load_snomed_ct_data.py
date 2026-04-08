@@ -22,22 +22,22 @@ from snomed_ct.models import Concept, Description, TextDefinition, Relationship,
 INTERNATIONAL_FILENAME_COMPONENT = '_INT_'
 US_FILENAME_COMPONENT = '_US'
 
-CONCEPT_FILENAME_PATTERN = 'sct2_Concept_{}{}.*\.txt'
-DESCRIPTION_FILENAME_PATTERN = 'sct2_Description_{}\-en{}.*\.txt'
-TEXTDEFINITION_FILENAME_PATTERN = 'sct2_TextDefinition_{}\-en{}.*\.txt'
-RELATIONSHIP_FILENAME_PATTERN = 'sct2_Relationship_{}{}.*\.txt'
-STATED_RELATIONSHIP_FILENAME_PATTERN = 'sct2_StatedRelationship_{}{}.*\.txt'
-LANGUAGE_FILENAME_PATTERN = 'der2_cRefset_Language{}-en{}.*\.txt'
-ASSOCIATION_FILENAME_PATTERN = 'der2_cRefset_AssociationReference{}{}.*\.txt'
-SIMPLE_FILENAME_PATTERN = 'der2_Refset_Simple{}{}.*\.txt'
-ATTRIBUTEVALUE_FILENAME_PATTERN = 'der2_cRefset_AttributeValue{}{}.*\.txt'
-SIMPLEMAP_FILENAME_PATTERN = 'der2_sRefset_SimpleMap{}{}.*\.txt'
-COMPLEXMAP_FILENAME_PATTERN = 'der2_iissscRefset_ComplexMap{}{}.*\.txt'
-EXTENDEDMAP_FILENAME_PATTERN = 'der2_iisssccRefset_ExtendedMap{}{}.*\.txt'
-TRANSITIVE_CLOSURE_FILENAME_PATTERN = 'res2_TransitiveClosure{}.*\.txt'
+CONCEPT_FILENAME_PATTERN = r'sct2_Concept_{}{}.*\.txt'
+DESCRIPTION_FILENAME_PATTERN = r'sct2_Description_{}\-en{}.*\.txt'
+TEXTDEFINITION_FILENAME_PATTERN = r'sct2_TextDefinition_{}\-en{}.*\.txt'
+RELATIONSHIP_FILENAME_PATTERN = r'sct2_Relationship_{}{}.*\.txt'
+STATED_RELATIONSHIP_FILENAME_PATTERN = r'sct2_StatedRelationship_{}{}.*\.txt'
+LANGUAGE_FILENAME_PATTERN = r'der2_cRefset_Language{}-en{}.*\.txt'
+ASSOCIATION_FILENAME_PATTERN = r'der2_cRefset_AssociationReference{}{}.*\.txt'
+SIMPLE_FILENAME_PATTERN = r'der2_Refset_Simple{}{}.*\.txt'
+ATTRIBUTEVALUE_FILENAME_PATTERN = r'der2_cRefset_AttributeValue{}{}.*\.txt'
+SIMPLEMAP_FILENAME_PATTERN = r'der2_sRefset_SimpleMap{}{}.*\.txt'
+COMPLEXMAP_FILENAME_PATTERN = r'der2_iissscRefset_ComplexMap{}{}.*\.txt'
+EXTENDEDMAP_FILENAME_PATTERN = r'der2_iisssccRefset_ExtendedMap{}{}.*\.txt'
+TRANSITIVE_CLOSURE_FILENAME_PATTERN = r'res2_TransitiveClosure{}.*\.txt'
 
 ICD_MAP_RELEASE_DIR_PATTERN = re.compile(r'SNOMED_CT_to_ICD\-10\-CM_Resources_.+')
-ICD_MAP_FILENAME = re.compile('tls_Icd10cmHumanReadableMap_US.*\.tsv')
+ICD_MAP_FILENAME = re.compile(r'tls_Icd10cmHumanReadableMap_US.*\.tsv')
 
 RELEASE_DIR_PATTERN = re.compile(r'^SnomedCT_.*')
 
@@ -68,8 +68,7 @@ class Command(BaseCommand):
         region_type = INTERNATIONAL_FILENAME_COMPONENT if options['international'] else US_FILENAME_COMPONENT
         with transaction.atomic():
             if not options['mapping_only']:
-                cursor = connection.cursor()
-
+                cursor = connection.connection.cursor()
                 with ZipFile(options['snomed_ct_location'], 'r') as zfile:
                     path = ZipPath(zfile)
                     dirs = list(path.iterdir())

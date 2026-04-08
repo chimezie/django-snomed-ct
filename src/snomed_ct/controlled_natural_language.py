@@ -2,7 +2,7 @@ import django
 django.setup()
 from itertools import groupby
 from snomed_ct.models import (ISA, ATTRIBUTE_HUMAN_READABLE_NAMES, pretty_print_list, Concept, ASSOCIATED_MORPHOLOGY,
-                              FINDING_SITE, SNOMED_NAME_PATTERN, Description)
+                              FINDING_SITE, SNOMED_NAME_PATTERN, Description, Relationship, DESCRIPTION_TYPES)
 from . import cnl_clauses
 from random import choice
 from django.db.models import Prefetch
@@ -14,12 +14,12 @@ try:
     cache = caches['snomed_ct']
 except:
     class PassThruCache:
-
-        def get(self, value):
-            raise NotImplemented(" ... ")
-
-        def set(self, key, val):
-            raise NotImplemented(" ... ")
+        def get_or_set(self, key, val_func, version):
+            return val_func()
+        def get(self, key):
+            return None
+        def set(self, concept_id, result):
+            pass
 
     cache = PassThruCache()
 
@@ -29,9 +29,8 @@ def non_isa_relationship_tuples(concept):
     pf=Prefetch('destination__descriptions',
                 queryset=Description.objects.fully_specified_names.filter(active=True))
     non_isa_relationships = (concept.outbound_relationships().filter(active=True).exclude(type_id=ISA)
-                              .select_related('type', 'destination')
-                              .prefetch_related(pf)
-                             )
+                                    .select_related('type', 'destination')
+                                    .prefetch_related(pf))
     return [(rel.id,
              rel.type.id,
              rel.destination.id,
@@ -39,6 +38,17 @@ def non_isa_relationship_tuples(concept):
              rel.relationship_group) for rel in
             non_isa_relationships]
 
+async def async_non_isa_relationship_tuples(concept):
+    pf=Prefetch('destination__descriptions',
+                queryset=Description.objects.fully_specified_names.filter(active=True))
+    non_isa_relationships = (concept.outbound_relationships().filter(active=True).exclude(type_id=ISA)
+                                    .select_related('type', 'destination')
+                                    .prefetch_related(pf))
+    return [(rel.id,
+             rel.type.id,
+             rel.destination.id,
+             rel.destination.descriptions.all()[0].term,
+             rel.relationship_group) async for rel in non_isa_relationships]
 
 relation_id = itemgetter(0)
 relation_type_id = itemgetter(1)
@@ -76,6 +86,9 @@ def render_object_concept_kwargs(rel):
     obj_name = relation_destination_name(rel)
     return {"concept_id": obj_id, "concept_full_name": obj_name}
 
+async def fully_specified_name_and_type(concept):
+    name = await concept.descriptions.aget(type_id=DESCRIPTION_TYPES['Fully specified name'], active=True)
+    return SNOMED_NAME_PATTERN.search(name.term).groups()
 
 INTERPRETS = 363714003
 HAS_INTERPRETATION = 363713009
@@ -122,6 +135,7 @@ DEVICE_INTENDED_SITE = 836358009
 PROCEDURE_MORPHOLOGY = 405816004
 PROCEDURE_SITE = 363704007
 FINDING_METHOD = 418775008
+PROCEDURE_APPROACH = 116688005
 FINDING_INFORMER = 419066007
 RECIPIENT_CATEGORY = 370131001
 ROUTE_OF_ADMINISTRATION = 410675002
@@ -224,7 +238,11 @@ class SnomedNounRenderer(ABC):
         elif tok.pos_ == "NOUN" and "Number=Sing" in tok.morph:
             return "singular noun"
 
-    def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None,
+    async def render_concept(self,
+                       concept=None,
+                       with_indef_article=False,
+                       concept_id=None,
+                       concept_full_name=None,
                        no_id=False):
         try:
             import spacy
@@ -240,7 +258,7 @@ class SnomedNounRenderer(ABC):
             cached_result = cache.get(concept_id)
             if cached_result:
                 return cached_result
-            concept_name, concept_type = concept.fully_specified_name_and_type()
+            concept_name, concept_type = await fully_specified_name_and_type(concept)
         concept_name = concept_name.lower().split(' - ')[0]
         if concept_name.endswith(', device'):
             concept_name = concept_name.split(', device')[0]
@@ -300,18 +318,18 @@ class DoseFormRenderer(ComplexRenderer):
         super().__init__(id_reference)
         self.relationships = relationships
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         phrases = []
         for group, group_rels in groupby(sorted(self.relationships, key=relation_group), relation_group):
             group_rels = list(group_rels)
             if list(relationship_filter(group_rels, self.identifying_properties, getter_fn=relation_type_id)):
-                self.render_group(group_rels, phrases, relationships)
+                await self.render_group(group_rels, phrases, relationships)
         return pretty_print_list(phrases, and_char=", and ") if phrases else ""
 
     def past_tense(self, s):
         return f"{s}{'ed' if s[-1] != 'e' else 'd'}"
 
-    def render_group(self, group_rels, phrases, relationships):
+    async def render_group(self, group_rels, phrases, relationships):
         dose_site_rels = list(relationship_filter(group_rels,
                                                   [HAS_DOSE_FORM_INTENDED_SITE],
                                                   getter_fn=relation_type_id))
@@ -329,42 +347,40 @@ class DoseFormRenderer(ComplexRenderer):
                                                   getter_fn=relation_type_id))
         if dose_admin_method_rels:
             phrases.append(cnl_clauses.ADMINISTERED_VIA.format(
-                self.render_concept(**render_object_concept_kwargs(dose_admin_method_rels[0]))
+                await self.render_concept(**render_object_concept_kwargs(dose_admin_method_rels[0]))
             ))
         if dose_release_rels:
             phrases.append(cnl_clauses.GIVEN_BY.format(
-                self.render_concept(**render_object_concept_kwargs(dose_release_rels[0]))
+                await self.render_concept(**render_object_concept_kwargs(dose_release_rels[0]))
             ))
         if dose_site_rels:
             phrases.append(cnl_clauses.GIVEN_BY_ADMINISTRATION.format(
-                self.render_concept(**render_object_concept_kwargs(dose_site_rels[0])))
+                await self.render_concept(**render_object_concept_kwargs(dose_site_rels[0])))
             )
         if dose_form_rels:
             if dose_transformation_rels:
                 transformation_rel = dose_transformation_rels[0]
                 transformation_id = relation_destination_id(transformation_rel)
-                transformation_name = self.render_concept(**render_object_concept_kwargs(transformation_rel),
-                                                          no_id=True)
+                transformation_name = await self.render_concept(**render_object_concept_kwargs(transformation_rel),
+                                                                no_id=True)
                 if transformation_id == self.NO_TRANSFORMATION:
                     phrases.append(cnl_clauses.ADMINISTERED_AS.format(
-                        self.render_concept(with_indef_article=True,
-                                            **render_object_concept_kwargs(dose_form_rels[0]))
+                        await self.render_concept(with_indef_article=True,
+                                                  **render_object_concept_kwargs(dose_form_rels[0]))
                     ))
                 else:
                     transform_modifiers = (self.transformation_alternate_modifiers.get(
                         transformation_id) or self.past_tense(transformation_name.lower())) + ", "
-                    modified_phrase = transform_modifiers + self.render_concept(
+                    modified_phrase = transform_modifiers + await self.render_concept(
                         **render_object_concept_kwargs(dose_form_rels[0]))
                     phrases.append(cnl_clauses.ADMINISTERED_AS.format(
                         prefix_with_indefinite_article(modified_phrase)
                     ))
-
             else:
                 phrases.append(cnl_clauses.ADMINISTERED_AS.format(
-                    self.render_concept(with_indef_article=True,
-                                        **render_object_concept_kwargs(dose_form_rels[0]))
+                    await self.render_concept(with_indef_article=True,
+                                              **render_object_concept_kwargs(dose_form_rels[0]))
                 ))
-
 
 class ClinicalDrugRenderer(ComplexRenderer):
     identifying_properties = [HAS_DOSE_FORM]
@@ -375,7 +391,7 @@ class ClinicalDrugRenderer(ComplexRenderer):
         super().__init__(id_reference)
         self.relationships = relationships
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         unit_rels = list(relationship_filter(self.relationships,
                                              [HAS_UNIT_OF_PRESENTATION],
                                              getter_fn=relation_type_id))
@@ -384,15 +400,15 @@ class ClinicalDrugRenderer(ComplexRenderer):
                                                   getter_fn=relation_type_id))
         if unit_rels:
             return cnl_clauses.PRESENTED_AS_2.format(
-                self.render_concept(with_indef_article=True,
-                                    **render_object_concept_kwargs(unit_rels[0])),
-                self.render_concept(with_indef_article=True,
-                                    **render_object_concept_kwargs(dose_form_rels[0]))
+                await self.render_concept(with_indef_article=True,
+                                          **render_object_concept_kwargs(unit_rels[0])),
+                await self.render_concept(with_indef_article=True,
+                                          **render_object_concept_kwargs(dose_form_rels[0]))
             )
         else:
-            return cnl_clauses.PRESENTED.format(
-                self.render_concept(with_indef_article=True,
-                                    **render_object_concept_kwargs(dose_form_rels[0])))
+            return cnl_clauses.PRESENTED_AS.format(
+                await self.render_concept(with_indef_article=True,
+                                          **render_object_concept_kwargs(dose_form_rels[0])))
 
 
 class MeasurableProductRenderer(ComplexRenderer):
@@ -408,15 +424,15 @@ class MeasurableProductRenderer(ComplexRenderer):
         super().__init__(id_reference)
         self.relationships = relationships
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         phrases = []
         for group, group_rels in groupby(sorted(self.relationships, key=relation_group), relation_group):
             group_rels = list(group_rels)
             if list(relationship_filter(group_rels, self.identifying_properties, getter_fn=relation_type_id)):
-                self.render_group(group_rels, phrases, relationships)
+                await self.render_group(group_rels, phrases, relationships)
         return pretty_print_list(phrases, and_char=", and ")
 
-    def render_group(self, group_rels, phrases, relationships):
+    async def render_group(self, group_rels, phrases, relationships):
         concentration_numerator_rels = list(relationship_filter(group_rels,
                                                                 [HAS_CONCENTRATION_STRENGTH_NUMERATOR_UNIT],
                                                                 getter_fn=relation_type_id))
@@ -437,23 +453,22 @@ class MeasurableProductRenderer(ComplexRenderer):
                                                    getter_fn=relation_type_id))
         phrases.extend([
             cnl_clauses.BASIS_OF_STRENGTH.format(
-                self.render_concept(**render_object_concept_kwargs(strength_basis_rels[0]))
+                await self.render_concept(**render_object_concept_kwargs(strength_basis_rels[0]))
             ),
             cnl_clauses.CONTAINS.format(
-                self.render_concept(**render_object_concept_kwargs(ingredient_rels[0]))
+                await self.render_concept(**render_object_concept_kwargs(ingredient_rels[0]))
             ),
         ])
         if concentration_numerator_rels:
             phrases.append(cnl_clauses.CONCENTRATION_UNITS.format(
-                self.render_concept(**render_object_concept_kwargs(concentration_numerator_rels[0])),
-                self.render_concept(**render_object_concept_kwargs(concentration_denominator_rels[0])),
+                await self.render_concept(**render_object_concept_kwargs(concentration_numerator_rels[0])),
+                await self.render_concept(**render_object_concept_kwargs(concentration_denominator_rels[0])),
             ))
         elif presentation_denominator_rels:
             phrases.append(cnl_clauses.PRESENTATION_STRENGTH_UNITS.format(
-                self.render_concept(**render_object_concept_kwargs(presentation_numerator_rels[0])),
-                self.render_concept(**render_object_concept_kwargs(presentation_denominator_rels[0])),
+                await self.render_concept(**render_object_concept_kwargs(presentation_numerator_rels[0])),
+                await self.render_concept(**render_object_concept_kwargs(presentation_denominator_rels[0])),
             ))
-
 
 class Pathophysiology(ComplexRenderer):
     identifying_properties = [ASSOCIATED_MORPHOLOGY, PATHOLOGICAL_PROCESS]
@@ -471,12 +486,12 @@ class Pathophysiology(ComplexRenderer):
         255410009,  #Maternal postpartum
     }
 
-    def analyze_occurrence_relation(self, occurrence_rel):
+    async def analyze_occurrence_relation(self, occurrence_rel):
         occurrence_id = relation_destination_id(occurrence_rel)
-        occurrence_name = self.render_concept(**render_object_concept_kwargs(occurrence_rel))
+        occurrence_name = await self.render_concept(**render_object_concept_kwargs(occurrence_rel))
         return occurrence_id in self.OCCURRENCES_AS_MODIFIERS, occurrence_name
 
-    def render_group(self, group_rels, phrases, relationships):
+    async def render_group(self, group_rels, phrases, relationships):
         group_rels = list(group_rels)
         causal_rels = list(relationship_filter(group_rels, [CAUSATIVE_AGENT], getter_fn=relation_type_id))
         path_process_rels = list(relationship_filter(group_rels, [PATHOLOGICAL_PROCESS],
@@ -489,7 +504,7 @@ class Pathophysiology(ComplexRenderer):
                                                   getter_fn=relation_type_id))
 
         if occurrence_rels:
-            occurrence_is_modifier, occurrence_name = self.analyze_occurrence_relation(occurrence_rels[0])
+            occurrence_is_modifier, occurrence_name = await self.analyze_occurrence_relation(occurrence_rels[0])
         else:
             occurrence_is_modifier = False
             occurrence_name = None
@@ -502,59 +517,60 @@ class Pathophysiology(ComplexRenderer):
             if occurrence_name and occurrence_is_modifier:
                 proc_phrase = "is {} {}".format(
                     prefix_with_indefinite_article(occurrence_name),
-                    self.render_concept(**render_object_concept_kwargs(process))
+                    await self.render_concept(**render_object_concept_kwargs(process))
                 )
             elif occurrence_name:
                 proc_phrase = cnl_clauses.PROCESS_OCCURRENCE.format(
-                    self.render_concept(with_indef_article=True, **render_object_concept_kwargs(process)),
+                    await self.render_concept(with_indef_article=True, **render_object_concept_kwargs(process)),
                     prefix_with_indefinite_article(occurrence_name)
                 )
             else:
-                proc_phrase = "is {}".format(self.render_concept(with_indef_article=True,
-                                                                 **render_object_concept_kwargs(process)))
+                proc_phrase = "is {}".format(await self.render_concept(with_indef_article=True,
+                                                                       **render_object_concept_kwargs(process)))
         elif morph_rels:
             morph_rel = morph_rels[0]
             causal_phrase = " caused by {}".format(
-                self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
-                                    with_indef_article=True)) if causal_rels else ""
+                await self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
+                                          with_indef_article=True)) if causal_rels else ""
             if occurrence_name and occurrence_is_modifier:
                 morph_phrase = cnl_clauses.MODIFIED_OCCURRING_MORPHOLOGY.format(
                     prefix_with_indefinite_article(occurrence_name),
-                    self.render_concept(**render_object_concept_kwargs(morph_rel)),
+                    await self.render_concept(**render_object_concept_kwargs(morph_rel)),
                     causal_phrase
                 )
             elif occurrence_name:
                 morph_phrase = cnl_clauses.OCCURRING_MORPHOLOGY.format(
-                    self.render_concept(with_indef_article=True,
+                    await self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(morph_rel)),
                     causal_phrase,
                     prefix_with_indefinite_article(occurrence_name)
                 )
             else:
                 morph_phrase = cnl_clauses.MORPHOLOGY.format(
-                    self.render_concept(with_indef_article=True,
+                    await self.render_concept(with_indef_article=True,
                                         **render_object_concept_kwargs(morph_rel)),
                     causal_phrase)
         elif occurrence_rels:
-            occurence_rel = occurrence_rels[0]
-            phrase = OccursRenderer(occurence_rel, id_reference=self.id_reference).render(relationships)
+            occurrence_rel = occurrence_rels[0]
+            renderer = await OccursRenderer.create(occurrence_rel, id_reference=self.id_reference)
+            phrase = await renderer.render(relationships)
         else:
             raise NotImplementedError(self.relationships)
         if path_process_rels and morph_rels:
             #Pathological process and associated morphological
             causal_phrase = " caused by {}".format(
-                self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
-                                    with_indef_article=True)) if causal_rels else ""
+                await self.render_concept(**render_object_concept_kwargs(causal_rels[0]),
+                                          with_indef_article=True)) if causal_rels else ""
             morph_rel = morph_rels[0]
             morph_phrase = cnl_clauses.MORPHOLOGY2.format(
-                self.render_concept(with_indef_article=True,
+                await self.render_concept(with_indef_article=True,
                                     **render_object_concept_kwargs(morph_rel)),
                 causal_phrase)
         if location_rels:
             location_rel = location_rels[0]
             location_phrase = cnl_clauses.LOCATION.format(
-                                self.render_concept(with_indef_article=True,
-                                                    **render_object_concept_kwargs((location_rel))))
+                                await self.render_concept(with_indef_article=True,
+                                                          **render_object_concept_kwargs((location_rel))))
         if proc_phrase:
             phrase = ((f"{proc_phrase} {morph_phrase} {location_phrase}"
                        if location_phrase else f"{proc_phrase} {morph_phrase}") if morph_phrase
@@ -563,18 +579,18 @@ class Pathophysiology(ComplexRenderer):
             phrase = f"{morph_phrase} {location_phrase}" if location_phrase else morph_phrase
         phrases.append(phrase)
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         phrases = []
         group_tracking = {}
         for group, group_rels in groupby(sorted(self.relationships, key=relation_group), relation_group):
             try:
-                self.render_group(group_rels, phrases, relationships)
+                await self.render_group(group_rels, phrases, relationships)
                 group_tracking[group] = True
             except NotImplementedError:
                 group_tracking[group] = False
         if all(map(lambda i:not i, group_tracking.values())):
             phrases2 = []
-            self.render_group(self.relationships, phrases2, relationships)
+            await self.render_group(self.relationships, phrases2, relationships)
             return pretty_print_list(phrases2, and_char=", and ")
         return pretty_print_list(phrases, and_char=", and ")
 
@@ -600,7 +616,7 @@ class SpecimenRenderer(ComplexRenderer):
         super().__init__(id_reference)
         self.relationships = relationships
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         phrases = []
         collection_info_rels = list(relationship_filter(self.relationships, [SPECIMEN_SOURCE_TOPOGRAPHY,
                                                                              SPECIMEN_PROCEDURE],
@@ -608,12 +624,12 @@ class SpecimenRenderer(ComplexRenderer):
                                     )
         collection_conjunction = pretty_print_list(["{} {}".format(
             self.COLLECTION_PHRASES_MAP[relation_type_id(rel)],
-            self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
-                                concept_full_name=relation_destination_name(rel)))
+            await self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
+                                      concept_full_name=relation_destination_name(rel)))
             for rel in collection_info_rels], and_char=", and ") if collection_info_rels else ""
         for rel in list(relationship_filter(self.relationships, self.OTHER_PHRASES, getter_fn=relation_type_id)):
-            destination_name = self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
-                                                   concept_full_name=relation_destination_name(rel))
+            destination_name = await self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
+                                                         concept_full_name=relation_destination_name(rel))
             phrases.append(f"{self.OTHER_PHRASES[relation_type_id(rel)]} {destination_name}")
         if collection_info_rels:
             return pretty_print_list([cnl_clauses.COLLECTION.format(collection_conjunction=collection_conjunction)] +
@@ -682,7 +698,7 @@ class SituationRenderer(ComplexRenderer):
         super().__init__(id_reference)
         self.relationships = relationships
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         subject_rels = relationship_filter(relationships, [SUBJECT_RELATIONSHIP_CONTEXT],
                                            getter_fn=relation_type_id)
         subject = list(map(lambda i: (relation_destination_id(i),
@@ -741,27 +757,28 @@ class SituationRenderer(ComplexRenderer):
         else:
             prefix = ""
 
-        subject_phrase = self.render_concept(with_indef_article=True,
-                                             concept_id=subject[0][0],
-                                             concept_full_name=subject[0][1]) if subject else None
+        subject_phrase = await self.render_concept(with_indef_article=True,
+                                                   concept_id=subject[0][0],
+                                                   concept_full_name=subject[0][1]) if subject else None
 
         assoc_finding = list(relationship_filter(relationships, [ASSOCIATED_FINDING],
                                                  getter_fn=relation_type_id))
         if assoc_procedure:
             proc = assoc_procedure[0]
-            rendered_proc = self.render_concept(concept_id=relation_destination_id(proc),
-                                                concept_full_name=relation_destination_name(proc))
+            rendered_proc = await self.render_concept(concept_id=relation_destination_id(proc),
+                                                      concept_full_name=relation_destination_name(proc))
             if proc_reworded_modifier:
                 proc_phrase = rendered_proc
             elif proc_context:
                 proc_id = relation_destination_id(proc_context[0])
                 proc_name = relation_destination_name(proc_context[0])
-                proc_context_suffix = self.render_concept(concept_id=proc_id, concept_full_name=proc_name)
+                proc_context_suffix = await self.render_concept(concept_id=proc_id, concept_full_name=proc_name)
                 proc_phrase = f"{rendered_proc} ({proc_context_suffix})"
             else:
-                proc_phrase = self.render_concept(proc, with_indef_article=True,
-                                                  concept_id=relation_destination_id(proc),
-                                                  concept_full_name=relation_destination_name(proc))
+                proc_phrase = await self.render_concept(proc,
+                                                        with_indef_article=True,
+                                                        concept_id=relation_destination_id(proc),
+                                                        concept_full_name=relation_destination_name(proc))
             if subject_phrase:
                 return cnl_clauses.SITUATION_PHRASE.format(subject_phrase, prefix,proc_phrase)
             else:
@@ -769,8 +786,8 @@ class SituationRenderer(ComplexRenderer):
         else:
             if assoc_finding:
                 finding = assoc_finding[0]
-                assoc_finding_phrase = self.render_concept(concept_id=relation_destination_id(finding),
-                                                           concept_full_name=relation_destination_name(finding))
+                assoc_finding_phrase = await self.render_concept(concept_id=relation_destination_id(finding),
+                                                                 concept_full_name=relation_destination_name(finding))
                 finding_phrase = f" of {assoc_finding_phrase}"
             else:
                 finding_phrase = ""
@@ -827,7 +844,12 @@ class InterpretationRolePairRenderer(RolePairRenderer):
     target_id = INTERPRETS
     object_id = [HAS_INTERPRETATION]
 
-    def render(self, relationships=None):
+    async def handle_object_rels(self, relationship):
+        return await self.render_concept(
+            concept_id=relation_destination_id(relationship),
+            concept_full_name=relation_destination_name(relationship))
+
+    async def render(self, relationships=None):
         grouping = {}
         for interpret_rel in relationship_filter(self.relationships, [self.target_id],
                                                  getter_fn=relation_type_id):
@@ -845,11 +867,9 @@ class InterpretationRolePairRenderer(RolePairRenderer):
         for _, items in grouping.items():
             for interpreted, object_rels in items:
                 interpreted_id, interpreted_name = interpreted
-                interpreted = self.render_concept(concept_id=interpreted_id, concept_full_name=interpreted_name)
-                targets = pretty_print_list(list(map(lambda i: self.render_concept(
-                                                                concept_id=relation_destination_id(i),
-                                                                concept_full_name=relation_destination_name(i)),
-                                                     object_rels)), and_char=", and ") if object_rels else None
+                interpreted = await self.render_concept(concept_id=interpreted_id, concept_full_name=interpreted_name)
+                targets = pretty_print_list([await self.handle_object_rels(object_rels) for object_rels in object_rels],
+                                            and_char=", and ") if object_rels else None
                 interpretation_outcome = f" as {targets}" if targets else ""
                 prefix = "is " if not phrases else ""
                 phrases.append(
@@ -974,22 +994,24 @@ class MethodApplicationRenderer(RolePairRenderer):
                       if relation_group(r) == group or isolated_non_target_rels]
         return object_rels, procedure_locations, using_rels
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         group_phrases = []
         grouping = self.get_method_groups()
         for group, items in grouping.items():
             for method, proc_locs, using_obj, method_rels in items:
                 if using_obj:
                     using_id, using_name = using_obj
-                    used_obj_phrase = self.render_concept(with_indef_article=True, concept_id=using_id,
-                                                          concept_full_name=using_name)
+                    used_obj_phrase = await self.render_concept(with_indef_article=True,
+                                                                concept_id=using_id,
+                                                                concept_full_name=using_name)
                 else:
                     used_obj_phrase = ''
                 via_phrase = cnl_clauses.USING_PHRASE.format(used_obj_phrase) if using_obj else ''
                 location_phrases = []
                 for modifier, location_id, location_name in proc_locs:
-                    loc_phrase = self.render_concept(with_indef_article=True, concept_id=location_id,
-                                                     concept_full_name=location_name)
+                    loc_phrase = await self.render_concept(with_indef_article=True,
+                                                           concept_id=location_id,
+                                                           concept_full_name=location_name)
                     location_phrases.append(f"{modifier}in {loc_phrase}")
                 if location_phrases:
                     prefix = " "
@@ -1003,7 +1025,7 @@ class MethodApplicationRenderer(RolePairRenderer):
                 else:
                     location_phrase = ""
                 method_id, method_name = method
-                method_name = self.get_method_name(method_id, method_name)
+                method_name = await self.get_method_name(method_id, method_name)
                 prefix = "is " if not group_phrases else ""
                 if method_rels:
                     method_obj_phrases = []
@@ -1013,8 +1035,9 @@ class MethodApplicationRenderer(RolePairRenderer):
                                                           relation_type_id):
                         obj_id, obj_name = destination_id_and_full_name(method_rel)
                         term, w_article = self.object_phrase[relation_type_id(method_rel)]
-                        obj_phrase = self.render_concept(with_indef_article=w_article,
-                                                         concept_id=obj_id, concept_full_name=obj_name)
+                        obj_phrase = await self.render_concept(with_indef_article=w_article,
+                                                               concept_id=obj_id,
+                                                               concept_full_name=obj_name)
                         suffix = " (indirectly)" if relation_type_id(method_rel) == INDIRECT_DEVICE else ""
                         direct_obj_info.append(
                             f"{obj_phrase}{suffix}"
@@ -1027,8 +1050,9 @@ class MethodApplicationRenderer(RolePairRenderer):
                                                           relation_type_id):
                         obj_id, obj_name = destination_id_and_full_name(method_rel)
                         term, w_article = self.object_phrase[relation_type_id(method_rel)]
-                        obj_phrase = self.render_concept(with_indef_article=w_article,
-                                                         concept_id=obj_id, concept_full_name=obj_name)
+                        obj_phrase = await self.render_concept(with_indef_article=w_article,
+                                                               concept_id=obj_id,
+                                                               concept_full_name=obj_name)
                         method_prefix = " " if not method_obj_phrases else ""
                         suffix = ""# if not method_obj_phrases else " "
                         method_obj_phrases.append(
@@ -1044,16 +1068,20 @@ class MethodApplicationRenderer(RolePairRenderer):
                                     ".  ".join(map(lambda i: f"It is {i}", group_phrases[1:])))
         return pretty_print_list(group_phrases, and_char=", and ")
 
-    def get_method_name(self, method_id, method_name):
+    async def get_method_name(self, method_id, method_name):
         method_rename_info = self.method_renaming_map.get(method_id)
         if method_rename_info == -1:
-            return self.render_concept(with_indef_article=False, concept_id=method_id, concept_full_name=method_name)
+            return await self.render_concept(with_indef_article=False,
+                                             concept_id=method_id,
+                                             concept_full_name=method_name)
         elif method_rename_info:
             return prefix_with_indefinite_article(self.method_renaming_map[method_id])
         else:
-            return self.render_concept(with_indef_article=True, concept_id=method_id, concept_full_name=method_name)
+            return await self.render_concept(with_indef_article=True,
+                                             concept_id=method_id,
+                                             concept_full_name=method_name)
 
-    def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None):
+    async def render_concept(self, concept=None, with_indef_article=False, concept_id=None, concept_full_name=None):
         if concept_id:
             concept_name, concept_type = SNOMED_NAME_PATTERN.search(concept_full_name).groups()
         else:
@@ -1082,28 +1110,38 @@ ROLE_PAIR_RENDERER_MAPPING = {
 class RoleRenderer(SnomedNounRenderer):
     can_collapse_objects = False
 
-    def __init__(self, relationship, id_reference=False, with_article=True, format_role_phrase=False):
+    @classmethod
+    async def create(cls, relationship, id_reference=False, with_article=True, **kwargs):#format_role_phrase=False):
+        concept = await Concept.objects.aget(id=relation_type_id(relationship))
+        role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
+            relation_type_id(relationship),
+            await fully_specified_name_no_type(concept)
+        )
+        return cls(relationship,
+                   role_phrase,
+                   id_reference,
+                   with_article,
+                   kwargs.get('format_role_phrase', False))
+
+    def __init__(self, relationship, role_phrase, id_reference=False, with_article=True, format_role_phrase=False):
         super().__init__(id_reference)
         self.format_role_phrase = format_role_phrase
         self.with_article = with_article
         self.is_lengthy = False
         self.relationship = relationship
-        self.role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
-            relation_type_id(self.relationship),
-            Concept.by_id(relation_type_id(self.relationship)).fully_specified_name_no_type)
+        self.role_phrase = role_phrase
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         dest_id,  dest_name = destination_id_and_full_name(self.relationship)
         if self.format_role_phrase:
             return self.role_phrase.lower().format(
-                self.render_concept(with_indef_article=self.with_article,
-                                    concept_id=dest_id, concept_full_name=dest_name))
+                await self.render_concept(with_indef_article=self.with_article,
+                                          concept_id=dest_id, concept_full_name=dest_name))
         else:
             return "{} {}".format(
                 self.role_phrase.lower(),
-                self.render_concept(with_indef_article=self.with_article,
-                                    concept_id=dest_id, concept_full_name=dest_name))
-
+                await self.render_concept(with_indef_article=self.with_article,
+                                          concept_id=dest_id, concept_full_name=dest_name))
 
 class NullRenderer(RoleRenderer):
     def render(self, relationships=None):
@@ -1111,12 +1149,20 @@ class NullRenderer(RoleRenderer):
 
 
 class RelationshipAsIsaRenderer(RoleRenderer):
-    def __init__(self, relationship, with_article=False, id_reference=False):
-        super().__init__(relationship, id_reference=id_reference, with_article=with_article)
+    @classmethod
+    async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
+            relation_type_id(relationship),
+            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+        )
+        return cls(relationship, role_phrase, id_reference=False, with_article=False)
 
-    def render(self, relationships=None):
+    def __init__(self, relationship, role_phrase, with_article=False, id_reference=False):
+        super().__init__(relationship, role_phrase, id_reference=id_reference, with_article=with_article)
+
+    async def render(self, relationships=None):
         obj_id, obj_name = destination_id_and_full_name(self.relationship)
-        object_name = self.render_concept(concept_id=obj_id, concept_full_name=obj_name)
+        object_name = await self.render_concept(concept_id=obj_id, concept_full_name=obj_name)
         if self.with_article:
             return f"is {prefix_with_indefinite_article(object_name[0].lower() + object_name[1:], unquoted=True)}"
         else:
@@ -1126,27 +1172,40 @@ class RelationshipAsIsaRenderer(RoleRenderer):
 class AlternativeNameRoleRenderer(RoleRenderer):
     can_collapse_objects = True
 
-    def __init__(self, alternative_role_name, relationship, id_reference=False, with_article=False):
-        super().__init__(relationship, id_reference=id_reference, with_article=with_article)
+    @classmethod
+    async def create(cls, relationship, id_reference=False, with_article=True, **kwargs):
+        concept = await Concept.objects.aget(id=relation_type_id(relationship))
+        role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
+            relation_type_id(relationship),
+            await fully_specified_name_no_type(concept)
+        )
+        return cls(kwargs['alternative_role_name'],
+                   relationship,
+                   role_phrase,
+                   id_reference,
+                   with_article)
+
+    def __init__(self, alternative_role_name, relationship, role_phrase, id_reference=False, with_article=False):
+        super().__init__(relationship, role_phrase, id_reference=id_reference, with_article=with_article)
         self.alternative_role_name = alternative_role_name
 
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         relation_list = list(set(relationship_filter(relationships, [relation_type_id(self.relationship)],
                                                      getter_fn=relation_type_id)))
         if len(relation_list) > 1:
             object_phrase = pretty_print_list([
-                self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
-                                    concept_full_name=relation_destination_name(rel))
-                                               for rel in relation_list], and_char=", and ")
+                await self.render_concept(with_indef_article=True, concept_id=relation_destination_id(rel),
+                                          concept_full_name=relation_destination_name(rel))
+                async for rel in relation_list], and_char=", and ")
         else:
             dest_id, dest_name = destination_id_and_full_name(self.relationship)
-            object_phrase = self.render_concept(with_indef_article=True, concept_id=dest_id,
-                                                concept_full_name=dest_name)
+            object_phrase = await self.render_concept(with_indef_article=True, concept_id=dest_id,
+                                                      concept_full_name=dest_name)
         return f"{self.alternative_role_name} {object_phrase}"
 
 
 class OccursRenderer(RoleRenderer):
-    def render(self, relationships=None):
+    async def render(self, relationships=None):
         if relation_destination_id(self.relationship) == TODDLER_PERIOD:
             return cnl_clauses.TODDLER_OCCURRENCE
         elif relation_destination_id(self.relationship) == NEO_NATAL_PERIOD:
@@ -1155,26 +1214,47 @@ class OccursRenderer(RoleRenderer):
             return "is congenital"
         else:
             dest_id, dest_name = destination_id_and_full_name(self.relationship)
-            dest_phrase = self.render_concept(with_indef_article=True, concept_id=dest_id, concept_full_name=dest_name)
+            dest_phrase = await self.render_concept(with_indef_article=True, concept_id=dest_id, concept_full_name=dest_name)
             return cnl_clauses.OTHER_OCCURRENCE.format(dest_phrase)
 
+    @classmethod
+    async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
+            relation_type_id(relationship),
+            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+        )
+        instance = cls(relationship, role_phrase, id_reference=False, with_article=False)
+        return instance
 
 class SiteRenderer(RoleRenderer):
     LOCATION_PHRASE = cnl_clauses.LOCATION_2
 
-    def __init__(self, relationship, id_reference=False, with_article=False):
-        super().__init__(relationship, id_reference=id_reference, with_article=with_article)
+    @classmethod
+    async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
+            relation_type_id(relationship),
+            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+        )
+        instance = cls(relationship, role_phrase, id_reference=False, with_article=True)
         destination_id = relation_destination_id(relationship)
         if PART_OF_TRANSITIVE_ENTAILMENT:
-            self.anatomical_sites = [self.render_concept(Concept.by_id(i), with_indef_article=True)
-                                     for i in set(Concept.by_id(destination_id).part_of_transitive())]
+            rendered_anatomical_sites = [await instance.render_concept(await Concept.aget(id=i))
+                                         for i in set(await Concept.objects.aget(id=destination_id)
+                                                                   .part_of_transitive())]
         else:
-            self.anatomical_sites = [self.render_concept(Concept.by_id(destination_id))]
-        if not self.anatomical_sites:
-            self.anatomical_sites = [self.render_concept(Concept.by_id(destination_id), with_indef_article=True)]
-        self.is_lengthy = len(self.anatomical_sites) > 1
+            rendered_anatomical_sites = [await instance.render_concept(await Concept.objects.aget(id=destination_id),
+                                                                       with_indef_article=True)]
+        if not rendered_anatomical_sites:
+            rendered_anatomical_sites = [await instance.render_concept(await Concept.objects.aget(id=destination_id),
+                                                                       with_indef_article=True)]
+        instance.anatomical_sites = rendered_anatomical_sites
+        instance.is_lengthy = len(instance.anatomical_sites) > 1
+        return instance
 
-    def render(self, relationships=None):
+    def __init__(self, relationship, role_phrase, id_reference=False, with_article=False):
+        super().__init__(relationship, role_phrase, id_reference=id_reference, with_article=with_article)
+
+    async def render(self, relationships=None):
         return "is{} {}".format(
             self.LOCATION_PHRASE,
             "{}".format(pretty_print_list(list(set(self.anatomical_sites)), and_char=", and "))
@@ -1210,6 +1290,7 @@ ROLE_PHRASES = {
     PROCEDURE_MORPHOLOGY: (cnl_clauses.INVOLVES_PHRASE, True),
     PROCEDURE_SITE: (cnl_clauses.PROCEDURE_SITE_PHRASE, True),
     FINDING_METHOD: (cnl_clauses.FINDING_METHOD_PHRASE, True),
+    PROCEDURE_APPROACH: (cnl_clauses.PROCEDURE_APPROACH_PHRASE, False),
     FINDING_INFORMER: (cnl_clauses.FINDING_INFORMER_PHRASE, True),
     HAS_FOCUS: (cnl_clauses.HAS_FOCUS_PHRASE, True),
     RECIPIENT_CATEGORY: (cnl_clauses.RECIPIENT_CATEGORY_PHRASE, True),
@@ -1239,17 +1320,18 @@ ROLE_PHRASES = {
 }
 
 
-def get_renderer(relationship, relationships, id_reference=False):
+async def get_renderer(relationship, relationships, id_reference=False):
     if relation_type_id(relationship) in [OCCURRENCE, DURING]:
-        return OccursRenderer(relationship, id_reference=id_reference)
+        return await OccursRenderer.create(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) == HAS_INTENT:
-        return AlternativeNameRoleRenderer(cnl_clauses.INTENDED_PHRASE, relationship,
-                                           id_reference=id_reference)
+        return await AlternativeNameRoleRenderer.create(relationship,
+                                                        id_reference=id_reference,
+                                                        alternative_role_name=cnl_clauses.INTENDED_PHRASE)
     elif relation_type_id(relationship) in [HAS_INTERPRETATION, CLINICAL_COURSE, SEVERITY, PRIORITY, SCALE_TYPE,
                                             HAS_ABSORBABILITY]:
-        return RelationshipAsIsaRenderer(relationship, id_reference=id_reference)
+        return await RelationshipAsIsaRenderer.create(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) in [DUE_TO, CAUSATIVE_AGENT]:
-        obj = RoleRenderer(relationship, id_reference=id_reference)
+        obj = await RoleRenderer.create(relationship, id_reference=id_reference)
         obj.role_phrase = cnl_clauses.CAUSED_BY_PHRASE
         return obj
     elif relation_type_id(relationship) in ROLE_PAIR_RENDERER_MAPPING:
@@ -1257,36 +1339,42 @@ def get_renderer(relationship, relationships, id_reference=False):
         obj = render_class(relationships, id_reference=id_reference)
         return obj
     elif relation_type_id(relationship) == AFTER:
-        obj = RoleRenderer(relationship, id_reference=id_reference)
+        obj = await RoleRenderer.create(relationship, id_reference=id_reference)
         obj.role_phrase = cnl_clauses.FOLLOWS_PHRASE
         return obj
     elif relation_type_id(relationship) in [PROCEDURE_SITE_DIRECT, PROCEDURE_SITE_INDIRECT, PROCEDURE_SITE]:
-        return ProcedureSiteRenderer(relationship, id_reference=id_reference)
+        return await ProcedureSiteRenderer.create(relationship, id_reference=id_reference)
     elif relation_type_id(relationship) in [FINDING_SITE, INHERENT_LOCATION, PROCESS_EXTENDS]:
-        return SiteRenderer(relationship, id_reference=id_reference)
+        return await SiteRenderer.create(relationship, id_reference=id_reference)
     else:
         for render_cls in OTHER_COMPLEX_RENDERERS:
             if relation_type_id(relationship) in render_cls.attributes:
                 renderer = render_cls(relationships, id_reference=id_reference)
                 return renderer
-        renderer = RoleRenderer(relationship, id_reference=id_reference)
+        renderer = await RoleRenderer.create(relationship, id_reference=id_reference)
         specified_role_phrase_info = ROLE_PHRASES.get(relation_type_id(relationship))
         if specified_role_phrase_info:
             renderer.role_phrase, renderer.with_article = specified_role_phrase_info
             renderer.format_role_phrase = True
         return renderer
 
+async def fully_specified_name_no_type(concept):
+    return SNOMED_NAME_PATTERN.search((await concept.async_get_fully_specified_name_async()).term).group('name')
 
 class ControlledEnglishGenerator(SnomedNounRenderer):
     def __init__(self, concept):
         super().__init__()
         self.concept = concept
 
-    def get_controlled_english_definition(self, embed_ids=False):
+    async def async_get_controlled_english_definition(self, embed_ids: bool=False, name:str = None):
         classification_names_w_article = [
-           "{} ({})".format(self.render_concept(c, with_indef_article=True), c.id) if embed_ids
-           else prefix_with_indefinite_article(c.fully_specified_name_no_type).lower() for c in self.concept.isa]
-        non_isa_relationships = non_isa_relationship_tuples(self.concept)
+           "{} ({})".format(await self.render_concept(c, with_indef_article=True), c.id) if embed_ids
+           else prefix_with_indefinite_article(await fully_specified_name_no_type(c)).lower()
+            async for c in Concept.objects.filter(id__in=Relationship.objects
+                                                                     .filter(source=self.concept)
+                                                                     .filter(type_id=ISA)
+                                                                     .values_list('destination', flat=True))]
+        non_isa_relationships = await async_non_isa_relationship_tuples(self.concept)
         has_role_group_definitions = len(non_isa_relationships)
         non_isa_rels_2_skip = set()
 
@@ -1304,14 +1392,14 @@ class ControlledEnglishGenerator(SnomedNounRenderer):
         lengthy_role_group_items = []
         for rel in non_isa_relationships:
             if relation_id(rel) not in non_isa_rels_2_skip:
-                renderer = get_renderer(rel, non_isa_relationships, id_reference=embed_ids)
+                renderer = await get_renderer(rel, non_isa_relationships, id_reference=embed_ids)
                 render_class = type(renderer)
                 if render_class.can_collapse_objects and renderer_class_count.get(render_class, 0):
                     continue
                 else:
                     renderer_class_count[render_class] = renderer_class_count.get(render_class, 0) + 1
                 (lengthy_role_group_items if isinstance(renderer, SiteRenderer) and renderer.is_lengthy
-                 else brief_role_group_items).append(renderer.render(relationships=non_isa_relationships,))
+                 else brief_role_group_items).append(await renderer.render(relationships=non_isa_relationships))
 
         role_group_defn_text = "It {}".format(pretty_print_list(brief_role_group_items,
                                                                 and_char=", and ")
@@ -1329,19 +1417,5 @@ class ControlledEnglishGenerator(SnomedNounRenderer):
             definition_text = role_group_defn_text
         else:
             definition_text = ""
-        return "{} is {}".format(self.concept.fully_specified_name_no_type,
-                                 definition_text) if definition_text else ""
-
-
-def main():
-    concepts = Concept.objects.mapped().has_definitions()
-    pks = concepts.ids
-    concept = Concept.objects.mapped().has_definitions().get(pk=choice(pks))
-    print(concept)
-    for defn in concept.definitions():
-        print(defn.term)
-    print(ControlledEnglishGenerator(concept).get_controlled_english_definition())
-
-
-if __name__ == '__main__':
-    main()
+        concept_name = name if name else await fully_specified_name_no_type(self.concept)
+        return "{} is {}".format(concept_name, definition_text) if definition_text else ""
