@@ -433,10 +433,10 @@ class Concept(CommonSNOMEDModel):
         )
 
     async def async_get_fully_specified_name_async(self):
-        fsn = self.descriptions.aget(
+        fsn = await self.descriptions.aget(
             type_id=DESCRIPTION_TYPES["Fully specified name"], active=True
         )
-        return await cache.get_or_set("fsn_%d" % self.id, lambda: fsn, None)
+        return cache.get_or_set("fsn_%d" % self.id, lambda: fsn, None)
 
     def get_fully_specified_name(self, lang="en_us"):
         return cache.get_or_set(

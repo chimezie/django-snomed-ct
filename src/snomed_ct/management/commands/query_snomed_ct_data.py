@@ -1,8 +1,3 @@
-try:
-    from tqdm import tqdm
-except ImportError:
-    def tqdm(item):
-        return item
 from datetime import datetime
 import asyncio
 from django.core.management.base import BaseCommand
@@ -13,8 +8,6 @@ async def fully_specified_name_and_type(concept, pattern=SNOMED_NAME_PATTERN):
     name = await concept.descriptions.aget(type_id=DESCRIPTION_TYPES['Fully specified name'], active=True)
     return pattern.search(name.term).groups()
 
-async def get_preferred_term(concept):
-    return concept.descriptions.filter(type_id=DESCRIPTION_TYPES['Synonym'], active=True)
 
 class Command(BaseCommand):
     help = 'Query SNOMED CT Release from the database.'
@@ -56,9 +49,14 @@ class Command(BaseCommand):
         rendered = rendered if rendered else set()
         if concept.id not in rendered:
             concept_name, _ = await fully_specified_name_and_type(concept)
-            other_terms = {term async for term in (await get_preferred_term(concept)).terms} - {concept_name}
-            alternative_terms = "({})".format(
-                ", ".join([term async for term in (await get_preferred_term(concept)).terms])) if other_terms else ""
+            preferred_descriptions = concept.descriptions.filter(
+                type_id=DESCRIPTION_TYPES['Synonym'], active=True
+            )
+            other_terms = {desc.term async for desc in preferred_descriptions} - {concept_name}
+            alternative_terms = (
+                "({})".format(", ".join([desc.term async for desc in preferred_descriptions]))
+                if other_terms else ""
+            )
             print("---" * 5, f"{concept.id}|{concept_name}", alternative_terms, "---" * 10)
             definitions = concept.definitions().filter(active=True)
             if await definitions.aexists():
@@ -84,55 +82,57 @@ class Command(BaseCommand):
                 except MalformedSNOMEDExpressionError as e:
                     print("Skipping (malformed expression)", e)
             else:
-                print(concept)
+                print(f"{concept.id}|{concept_name}")
             mappings = (concept.icd10_mappings.filter(map_rule='TRUE')
                                               .exclude(map_target__isnull=True)
                                               .exclude(map_target__exact=''))
             if await mappings.aexists():
                 print("ICD 10 Mappings:", ", ".join(["{} ({})".format(term_map.map_target,
                                                                       term_map.map_target_name)
-                                                     async for term_map in mappings]) )
+                                                     async for term_map in mappings]))
             rendered.add(concept.id)
             if related >= 1:
                 print("{} Related {}".format("---" * 5, "---" * 10))
                 async for c in concept.outbound_relationships().filter(active=True, type_id=ISA).destinations():
-                    await self.render_concept(c, output_type, related=related-1, rendered=rendered)
+                    await self.render_concept(c, output_type, related=related - 1, rendered=rendered)
                 async for c in concept.inbound_relationships().filter(active=True).exclude(type_id=ISA).sources():
-                    await self.render_concept(c, output_type, related=related-1, rendered=rendered)
+                    await self.render_concept(c, output_type, related=related - 1, rendered=rendered)
 
     def handle(self, *args, **options):
+        asyncio.run(self._handle_async(**options))
+
+    async def _handle_async(self, **options):
         search_type = (TextSearchTypes.CASE_INSENSITIVE_REGEX if options['regex']
                        else TextSearchTypes.CASE_INSENSITIVE_CONTAINS)
-        rendered_concepts = set()
+        rendered = set()
+        related = 1 if options['related'] else -1
+        output_type = options['output_type']
+
         if options['query_type'] == 'SNOMED':
             concepts = Concept.by_fully_specified_name(options['search_terms'], search_type=search_type)
             concepts = concepts.has_definitions() if options['def_only'] else concepts
-            for concept in concepts.is_active().prefetch_related(
+            async for concept in concepts.is_active().prefetch_related(
                     'descriptions',
                     'source_relationships',
                     'source_relationships__type'
             ):
-                asyncio.run(
-                    self.render_concept(concept,
-                                        options['output_type'],
-                                        1 if options['related'] else -1,
-                                        rendered=rendered_concepts))
+                await self.render_concept(concept, output_type, related, rendered)
+
         elif options['query_type'] == 'SNOMED_CODE':
             concepts = Concept.objects.by_ids(options['search_terms'])
             concepts = concepts.has_definitions() if options['def_only'] else concepts
-            for concept in concepts.is_active().prefetch_related(
+            async for concept in concepts.is_active().prefetch_related(
                     'descriptions',
                     'source_relationships',
                     'source_relationships__type'
             ):
-                asyncio.run(self.render_concept(concept,
-                                                options['output_type'],
-                                                1 if options['related'] else -1,
-                                                rendered=rendered_concepts))
+                await self.render_concept(concept, output_type, related, rendered)
+
         elif options['query_type'] == 'ICD_CODE':
             mappings = ICD10_Mapping.objects.by_icd_codes(options['search_terms'])
             mappings = mappings.has_definitions() if options['def_only'] else mappings
-            for mapping in mappings:
+            mappings = mappings.select_related('referenced_component')
+            async for mapping in mappings:
                 concept = mapping.referenced_component
                 icd_name = mapping.map_target_name.split(', unspecified')[0]
                 if concept.active:
@@ -140,23 +140,25 @@ class Command(BaseCommand):
                     if options['similarity'] > float(0):
                         try:
                             from Levenshtein import ratio
-                            score1 = ratio(concept.fully_specified_name_no_type, icd_name)
-                            score2 = max([ratio(syn, icd_name) for syn in concept.get_preferred_term().terms])
+                            fsn_name, _ = await fully_specified_name_and_type(concept)
+                            concept_fsn_no_type = SNOMED_NAME_PATTERN.search(fsn_name).group("name")
+                            score1 = ratio(concept_fsn_no_type, icd_name)
+                            preferred = concept.descriptions.filter(
+                                type_id=DESCRIPTION_TYPES['Synonym'], active=True
+                            )
+                            pref_terms = [desc.term async for desc in preferred]
+                            score2 = max(ratio(syn, icd_name) for syn in pref_terms)
                             if score1 < options['similarity'] or score2 < options['similarity']:
                                 render = False
                         except ImportError:
-                            raise NotImplemented("Please install python-Levenshtein")
+                            raise NotImplementedError("Please install python-Levenshtein")
                     if render:
-                        asyncio.run(self.render_concept(concept,
-                                                        options['output_type'],
-                                                        1 if options['related'] else -1,
-                                                        rendered=rendered_concepts))
+                        await self.render_concept(concept, output_type, related, rendered)
+
         else:
             mappings = ICD10_Mapping.objects.by_icd_names(options['search_terms'], search_type=search_type)
             mappings = mappings.has_definitions() if options['def_only'] else mappings
-            for mapping in mappings:
+            mappings = mappings.select_related('referenced_component')
+            async for mapping in mappings:
                 if mapping.referenced_component.active:
-                    asyncio.run(self.render_concept(mapping.referenced_component,
-                                                    options['output_type'],
-                                                    1 if options['related'] else -1,
-                                                    rendered=rendered_concepts))
+                    await self.render_concept(mapping.referenced_component, output_type, related, rendered)
