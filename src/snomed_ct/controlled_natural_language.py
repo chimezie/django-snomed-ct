@@ -23,7 +23,67 @@ except:
 
     cache = PassThruCache()
 
+# ---------------------------------------------------------------------------
+# In-process (module-level) caches for the async CNL rendering hot path.
+#
+# WHY these exist:
+#   * The 'snomed_ct' Django cache is a PyMemcacheCache. Its get/set are *blocking
+#     network round-trips*. Calling them from inside async render code serialized every
+#     worker and blocked the event loop (and risked a hard hang if memcached was slow).
+#     These dicts replace those calls with in-process memoization.
+#   * Relationship-type / destination concepts are looked up repeatedly; memoizing the
+#     `aget` and the fully-specified-name lookup removes N+1 queries, cutting serialized
+#     DB round-trips per concept.
+#
+# LIFETIME / MEMORY: these are process-global and unbounded. Growth is bounded in practice
+# by the number of *distinct* concepts rendered (values are short strings / one Concept
+# per id). For the batch command this is a large win; for the long-lived web process it is
+# a bounded, deterministic memoization. If memory ever becomes a concern, swap for an
+# LRU (e.g. cachetools.LRUCache) -- keys are concept ids, values are render-safe.
+#
+# CORRECTNESS NOTE: `_concept_render_cache` is keyed by concept id ALONE (matching the
+# original memcached behavior). The rendered string can depend on flags like
+# `with_indef_article`, but the first rendering of a given concept id wins and is reused --
+# this preserves the pre-existing (established) behavior; do not "fix" it without checking
+# downstream expectations.
+#
+# CONCURRENCY NOTE: reads/writes are plain dict ops. Under a single asyncio event loop
+# there is no preemption between `await`s, so the check-then-set is safe here. A worst case
+# is a redundant duplicate computation on a race, never corruption. Do NOT share these
+# across threads/processes without a lock.
+# ---------------------------------------------------------------------------
+_concept_render_cache: dict[int, str] = {}
+_concept_aget_cache: dict[int, "Concept"] = {}
+_fsn_no_type_cache: dict[int, str] = {}
+
 PART_OF_TRANSITIVE_ENTAILMENT = False
+
+
+async def _aget_concept(concept_id: int):
+    """Async, memoized ``Concept.objects.aget(id=...)``.
+
+    Cuts N+1 queries for repeatedly-referenced concepts (notably the ~100 relationship
+    *type*/attribute concepts, which become dict hits after warmup). Backed by
+    ``_concept_aget_cache``.
+    """
+    if concept_id not in _concept_aget_cache:
+        _concept_aget_cache[concept_id] = await Concept.objects.aget(id=concept_id)
+    return _concept_aget_cache[concept_id]
+
+
+async def _fsn_name_no_type(concept):
+    """Async, memoized fully-specified-name-without-type for ``concept``.
+
+    Equivalent to ``fully_specified_name_no_type`` but caches the parsed name string in
+    ``_fsn_no_type_cache`` so repeated renders of the same destination concept do not
+    re-hit the (serialized) async ORM.
+    """
+    if concept.id not in _fsn_no_type_cache:
+        _fsn_no_type_cache[concept.id] = SNOMED_NAME_PATTERN.search(
+            (await concept.async_get_fully_specified_name_async()).term
+        ).group('name')
+    return _fsn_no_type_cache[concept.id]
+
 
 def non_isa_relationship_tuples(concept):
     pf=Prefetch('destination__descriptions',
@@ -39,6 +99,12 @@ def non_isa_relationship_tuples(concept):
             non_isa_relationships]
 
 async def async_non_isa_relationship_tuples(concept):
+    # PERF / FUTURE WORK: this issues a fresh `outbound_relationships()` query
+    # (Relationship.objects.filter(source=concept)) per concept. The batch command already
+    # prefetches `source_relationships` (+ `source_relationships__type`) on the Concept, so
+    # this is a redundant DB round trip that is NOT served by the prefetch. Reworking this
+    # to consume `concept.source_relationships.all()` (filtering active / excluding ISA in
+    # Python) would remove one serialized query per concept.
     pf=Prefetch('destination__descriptions',
                 queryset=Description.objects.fully_specified_names.filter(active=True))
     non_isa_relationships = (concept.outbound_relationships().filter(active=True).exclude(type_id=ISA)
@@ -255,7 +321,8 @@ class SnomedNounRenderer(ABC):
         else:
             assert concept is not None
             concept_id = concept.id
-            cached_result = cache.get(concept_id)
+            # In-process memo (was a blocking memcached get; see module cache docstring).
+            cached_result = _concept_render_cache.get(concept_id)
             if cached_result:
                 return cached_result
             concept_name, concept_type = await fully_specified_name_and_type(concept)
@@ -278,7 +345,7 @@ class SnomedNounRenderer(ABC):
             concept_name_phrase = concept_name
         result = concept_name_phrase if no_id or not self.id_reference else "{} ({})".format(
             concept_name_phrase, concept_id)
-        cache.set(concept_id, result)
+        _concept_render_cache[concept_id] = result
         return result
 
 
@@ -1087,9 +1154,13 @@ class MethodApplicationRenderer(RolePairRenderer):
         else:
             assert concept is not None
             concept_id = concept.id
-            cached_result = cache.get(concept_id)
+            # In-process memo (was a blocking memcached get; see module cache docstring).
+            cached_result = _concept_render_cache.get(concept_id)
             if cached_result:
                 return cached_result
+            # NOTE: sync ORM accessor -- safe only when `concept` has prefetched
+            # descriptions (as in the batch command). Reached only on the embed_ids=True
+            # path; the extraction command uses embed_ids=False.
             concept_name, concept_type = concept.fully_specified_name_and_type()
         name = concept_name.lower().split(' - ')[0]
 
@@ -1097,7 +1168,7 @@ class MethodApplicationRenderer(RolePairRenderer):
             name = name.split(', device')[0]
         name_phrase = prefix_with_indefinite_article(name) if with_indef_article else name
         result = name_phrase if not self.id_reference else "{} ({})".format(name_phrase, concept_id)
-        cache.set(concept_id, result)
+        _concept_render_cache[concept_id] = result
         return result
 
 
@@ -1112,10 +1183,18 @@ class RoleRenderer(SnomedNounRenderer):
 
     @classmethod
     async def create(cls, relationship, id_reference=False, with_article=True, **kwargs):#format_role_phrase=False):
-        concept = await Concept.objects.aget(id=relation_type_id(relationship))
+        # FUTURE WORK: the `.get(key, <default>)` form evaluates the default expression
+        # (`_aget_concept` + `_fsn_name_no_type`) *unconditionally*, even when the key is
+        # present in ATTRIBUTE_HUMAN_READABLE_NAMES. Memoization keeps this cheap after
+        # warmup, but the cleaner form is:
+        #     role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(type_id)
+        #     if role_phrase is None:
+        #         role_phrase = await _fsn_name_no_type(await _aget_concept(type_id))
+        # (Same pattern repeats in the other RoleRenderer subclasses below.)
+        concept = await _aget_concept(relation_type_id(relationship))
         role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
             relation_type_id(relationship),
-            await fully_specified_name_no_type(concept)
+            await _fsn_name_no_type(concept)
         )
         return cls(relationship,
                    role_phrase,
@@ -1151,9 +1230,10 @@ class NullRenderer(RoleRenderer):
 class RelationshipAsIsaRenderer(RoleRenderer):
     @classmethod
     async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        concept = await _aget_concept(relation_type_id(relationship))
         role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
             relation_type_id(relationship),
-            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+            await _fsn_name_no_type(concept)
         )
         return cls(relationship, role_phrase, id_reference=False, with_article=False)
 
@@ -1174,10 +1254,10 @@ class AlternativeNameRoleRenderer(RoleRenderer):
 
     @classmethod
     async def create(cls, relationship, id_reference=False, with_article=True, **kwargs):
-        concept = await Concept.objects.aget(id=relation_type_id(relationship))
+        concept = await _aget_concept(relation_type_id(relationship))
         role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
             relation_type_id(relationship),
-            await fully_specified_name_no_type(concept)
+            await _fsn_name_no_type(concept)
         )
         return cls(kwargs['alternative_role_name'],
                    relationship,
@@ -1219,9 +1299,10 @@ class OccursRenderer(RoleRenderer):
 
     @classmethod
     async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        concept = await _aget_concept(relation_type_id(relationship))
         role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
             relation_type_id(relationship),
-            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+            await _fsn_name_no_type(concept)
         )
         instance = cls(relationship, role_phrase, id_reference=False, with_article=False)
         return instance
@@ -1231,21 +1312,22 @@ class SiteRenderer(RoleRenderer):
 
     @classmethod
     async def create(cls, relationship, id_reference=False, with_article=False, **kwargs):
+        concept = await _aget_concept(relation_type_id(relationship))
         role_phrase = ATTRIBUTE_HUMAN_READABLE_NAMES.get(
             relation_type_id(relationship),
-            await fully_specified_name_no_type(await Concept.objects.aget(id=relation_type_id(relationship)))
+            await _fsn_name_no_type(concept)
         )
         instance = cls(relationship, role_phrase, id_reference=False, with_article=True)
         destination_id = relation_destination_id(relationship)
         if PART_OF_TRANSITIVE_ENTAILMENT:
-            rendered_anatomical_sites = [await instance.render_concept(await Concept.aget(id=i))
-                                         for i in set(await Concept.objects.aget(id=destination_id)
-                                                                   .part_of_transitive())]
+            rendered_anatomical_sites = [await instance.render_concept(await _aget_concept(i))
+                                         for i in set(await (await _aget_concept(destination_id))
+                                                                    .part_of_transitive())]
         else:
-            rendered_anatomical_sites = [await instance.render_concept(await Concept.objects.aget(id=destination_id),
+            rendered_anatomical_sites = [await instance.render_concept(await _aget_concept(destination_id),
                                                                        with_indef_article=True)]
         if not rendered_anatomical_sites:
-            rendered_anatomical_sites = [await instance.render_concept(await Concept.objects.aget(id=destination_id),
+            rendered_anatomical_sites = [await instance.render_concept(await _aget_concept(destination_id),
                                                                        with_indef_article=True)]
         instance.anatomical_sites = rendered_anatomical_sites
         instance.is_lengthy = len(instance.anatomical_sites) > 1
@@ -1359,7 +1441,11 @@ async def get_renderer(relationship, relationships, id_reference=False):
         return renderer
 
 async def fully_specified_name_no_type(concept):
-    return SNOMED_NAME_PATTERN.search((await concept.async_get_fully_specified_name_async()).term).group('name')
+    if concept.id not in _fsn_no_type_cache:
+        _fsn_no_type_cache[concept.id] = SNOMED_NAME_PATTERN.search(
+            (await concept.async_get_fully_specified_name_async()).term
+        ).group('name')
+    return _fsn_no_type_cache[concept.id]
 
 class ControlledEnglishGenerator(SnomedNounRenderer):
     def __init__(self, concept):

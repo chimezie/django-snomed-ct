@@ -25,6 +25,20 @@ except:
     cache = PassThruCache()
 
 
+# In-process cache of a Concept's Fully Specified Name (FSN) Description, keyed by concept
+# id, for the async CNL rendering hot path.
+#
+# WHY: `async_get_fully_specified_name_async` previously round-tripped through the
+# 'snomed_ct' memcached backend (`cache.get_or_set`) on every call. That is *blocking*
+# network I/O; invoking it from async render code serialized the worker pool and blocked
+# the event loop. This dict memoizes the fetched Description instead.
+#
+# LIFETIME / MEMORY: process-global and unbounded, bounded in practice by the number of
+# distinct concepts whose FSN is requested. Swap for an LRU if memory ever matters. Not
+# safe to share across threads/processes without a lock; fine under a single asyncio loop.
+_fsn_cache: dict[int, "Description"] = {}
+
+
 def print_function_entry_and_exit(decorated_function):
     """
     Function decorator logging entry + exit and parameters of functions.
@@ -433,10 +447,17 @@ class Concept(CommonSNOMEDModel):
         )
 
     async def async_get_fully_specified_name_async(self):
-        fsn = await self.descriptions.aget(
-            type_id=DESCRIPTION_TYPES["Fully specified name"], active=True
-        )
-        return cache.get_or_set("fsn_%d" % self.id, lambda: fsn, None)
+        """Return this concept's active Fully Specified Name ``Description`` (async).
+
+        Memoized via the module-level ``_fsn_cache`` to avoid a blocking memcached
+        round-trip on the async hot path (see ``_fsn_cache`` docstring). The DB fetch uses
+        the native async ``aget`` only on a cache miss.
+        """
+        if self.id not in _fsn_cache:
+            _fsn_cache[self.id] = await self.descriptions.aget(
+                type_id=DESCRIPTION_TYPES["Fully specified name"], active=True
+            )
+        return _fsn_cache[self.id]
 
     def get_fully_specified_name(self, lang="en_us"):
         return cache.get_or_set(
