@@ -109,7 +109,7 @@ class Command(BaseCommand):
         output_type = options['output_type']
 
         if options['query_type'] == 'SNOMED':
-            concepts = Concept.by_fully_specified_name(options['search_terms'], search_type=search_type)
+            concepts = Concept.objects.by_full_specified_names(options['search_terms'], search_type=search_type)
             concepts = concepts.has_definitions() if options['def_only'] else concepts
             async for concept in concepts.is_active().prefetch_related(
                     'descriptions',
